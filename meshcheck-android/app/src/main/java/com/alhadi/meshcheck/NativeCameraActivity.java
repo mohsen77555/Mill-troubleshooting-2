@@ -10,6 +10,8 @@ import android.os.Bundle;
 import android.util.DisplayMetrics;
 import android.util.Size;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -22,9 +24,12 @@ import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.Preview;
+import androidx.camera.core.ZoomState;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
@@ -32,7 +37,9 @@ import androidx.core.content.ContextCompat;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.File;
+import java.util.Locale;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 public class NativeCameraActivity extends ComponentActivity {
     public static final String EXTRA_CAPTURE_PATH = "meshcheck.capture_path";
@@ -43,7 +50,10 @@ public class NativeCameraActivity extends ComponentActivity {
     private Camera camera;
     private Button captureButton;
     private Button flashButton;
+    private TextView zoomLabel;
+    private ScaleGestureDetector scaleGestureDetector;
     private boolean torchOn;
+    private boolean zoomGestureUsed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,7 +84,7 @@ public class NativeCameraActivity extends ComponentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView topGuide = new TextView(this);
-        topGuide.setText("ضع المنخل بشكل مسطح • مسطرة 1 cm على الشاشة مرجع بصري فقط");
+        topGuide.setText("Pinch للتقريب • اضغط على الخيوط للتركيز • مسطرة 1 cm مرجع بصري");
         topGuide.setTextColor(Color.WHITE);
         topGuide.setTextSize(13f);
         topGuide.setGravity(Gravity.CENTER);
@@ -86,6 +96,36 @@ public class NativeCameraActivity extends ComponentActivity {
                 Gravity.TOP);
         guideParams.setMargins(dp(10), dp(12), dp(10), 0);
         root.addView(topGuide, guideParams);
+
+        LinearLayout zoomPanel = new LinearLayout(this);
+        zoomPanel.setOrientation(LinearLayout.HORIZONTAL);
+        zoomPanel.setGravity(Gravity.CENTER);
+        zoomPanel.setPadding(dp(8), dp(6), dp(8), dp(6));
+        zoomPanel.setBackgroundColor(0xA6071318);
+
+        Button zoom1 = makeZoomButton("1×", 1f);
+        Button zoom2 = makeZoomButton("2×", 2f);
+        Button zoom3 = makeZoomButton("3×", 3f);
+        Button zoom5 = makeZoomButton("5×", 5f);
+        zoomLabel = new TextView(this);
+        zoomLabel.setText("Zoom 1.0×");
+        zoomLabel.setTextColor(Color.WHITE);
+        zoomLabel.setTextSize(14f);
+        zoomLabel.setGravity(Gravity.CENTER);
+        zoomLabel.setPadding(dp(8), 0, dp(8), 0);
+
+        zoomPanel.addView(zoom1, weightedButtonParams());
+        zoomPanel.addView(zoom2, weightedButtonParams());
+        zoomPanel.addView(zoom3, weightedButtonParams());
+        zoomPanel.addView(zoom5, weightedButtonParams());
+        zoomPanel.addView(zoomLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.4f));
+
+        FrameLayout.LayoutParams zoomParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
+        zoomParams.setMargins(dp(8), 0, dp(8), dp(72));
+        root.addView(zoomPanel, zoomParams);
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
@@ -120,7 +160,43 @@ public class NativeCameraActivity extends ComponentActivity {
                 Gravity.BOTTOM);
         root.addView(controls, controlParams);
 
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScaleBegin(@NonNull ScaleGestureDetector detector) {
+                zoomGestureUsed = true;
+                return true;
+            }
+
+            @Override
+            public boolean onScale(@NonNull ScaleGestureDetector detector) {
+                if (camera == null) return false;
+                ZoomState state = camera.getCameraInfo().getZoomState().getValue();
+                if (state == null) return false;
+                setZoomRatio(state.getZoomRatio() * detector.getScaleFactor());
+                return true;
+            }
+        });
+
+        previewView.setOnTouchListener((view, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) zoomGestureUsed = false;
+            scaleGestureDetector.onTouchEvent(event);
+            if (event.getActionMasked() == MotionEvent.ACTION_UP && !zoomGestureUsed) {
+                focusAt(event.getX(), event.getY());
+                view.performClick();
+            }
+            return true;
+        });
+
         setContentView(root);
+    }
+
+    private Button makeZoomButton(String label, float ratio) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(12f);
+        button.setPadding(dp(4), 0, dp(4), 0);
+        button.setOnClickListener(v -> setZoomRatio(ratio));
+        return button;
     }
 
     private LinearLayout.LayoutParams weightedButtonParams() {
@@ -137,7 +213,7 @@ public class NativeCameraActivity extends ComponentActivity {
                 Preview preview = new Preview.Builder().build();
                 imageCapture = new ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                        .setTargetResolution(new Size(1920, 1080))
+                        .setTargetResolution(new Size(2560, 1440))
                         .build();
                 CameraSelector selector = CameraSelector.DEFAULT_BACK_CAMERA;
                 provider.unbindAll();
@@ -145,13 +221,44 @@ public class NativeCameraActivity extends ComponentActivity {
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
                 captureButton.setEnabled(true);
                 flashButton.setEnabled(camera.getCameraInfo().hasFlashUnit());
-            } catch (ExecutionException | InterruptedException exception) {
+
+                camera.getCameraInfo().getZoomState().observe(this, state -> {
+                    if (state == null) return;
+                    zoomLabel.setText(String.format(Locale.US, "Zoom %.1f×\nmax %.1f×", state.getZoomRatio(), state.getMaxZoomRatio()));
+                });
+            } catch (ExecutionException exception) {
                 Toast.makeText(this, "تعذر تشغيل الكاميرا: " + exception.getMessage(), Toast.LENGTH_LONG).show();
+            } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
+                Toast.makeText(this, "تمت مقاطعة تشغيل الكاميرا.", Toast.LENGTH_LONG).show();
             } catch (Exception exception) {
                 Toast.makeText(this, "تعذر تشغيل الكاميرا الخلفية: " + exception.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    private void setZoomRatio(float requestedRatio) {
+        if (camera == null) return;
+        ZoomState state = camera.getCameraInfo().getZoomState().getValue();
+        if (state == null) return;
+        float ratio = Math.max(state.getMinZoomRatio(), Math.min(state.getMaxZoomRatio(), requestedRatio));
+        camera.getCameraControl().setZoomRatio(ratio);
+    }
+
+    private void focusAt(float x, float y) {
+        if (camera == null) return;
+        try {
+            MeteringPoint point = previewView.getMeteringPointFactory().createPoint(x, y);
+            FocusMeteringAction action = new FocusMeteringAction.Builder(
+                    point,
+                    FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
+                    .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                    .build();
+            camera.getCameraControl().startFocusAndMetering(action);
+            Toast.makeText(this, "Focus", Toast.LENGTH_SHORT).show();
+        } catch (Exception ignored) {
+            // Autofocus is best-effort; image capture still works on cameras without AF regions.
+        }
     }
 
     private void toggleTorch() {
@@ -210,6 +317,7 @@ public class NativeCameraActivity extends ComponentActivity {
         RulerOverlayView(NativeCameraActivity context) {
             super(context);
             setWillNotDraw(false);
+            setClickable(false);
             DisplayMetrics metrics = getResources().getDisplayMetrics();
             density = metrics.density;
             float xdpi = metrics.xdpi;
@@ -243,7 +351,6 @@ public class NativeCameraActivity extends ComponentActivity {
             }
             canvas.drawText("1 cm  •  10 mm", left, top + 30f * density, textPaint);
 
-            // Central alignment guide for keeping the phone perpendicular to the cloth.
             float cx = getWidth() / 2f;
             float cy = getHeight() / 2f;
             float arm = 18f * density;
