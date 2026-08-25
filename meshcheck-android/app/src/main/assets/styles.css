@@ -45,6 +45,12 @@ button.secondary { border: 1px solid #8ab9bd; color: var(--teal-dark); backgroun
 .button-row button { flex: 1; }
 .wide { display: block; width: 100%; margin-top: 13px; background: var(--teal-dark); }
 .secondary.wide { background: white; }
+.camera-frame { position: relative; display: grid; min-height: 240px; margin-top: 13px; overflow: hidden; place-items: center; border: 1px solid var(--line); border-radius: 14px; background: #111b20; }
+#cameraPreview { display: block; width: 100%; min-height: 240px; max-height: 520px; object-fit: contain; background: #111b20; }
+.camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #d9e3e8; text-align: center; background: #26343b; }
+.camera-controls { flex-wrap: wrap; }
+.camera-divider { display: flex; align-items: center; gap: 9px; margin: 14px 0 0; color: var(--muted); font-size: .78rem; }
+.camera-divider::before, .camera-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 .canvas-heading, .results-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .canvas-wrap { position: relative; display: grid; min-height: 160px; margin-top: 12px; overflow: hidden; place-items: center; border: 1px solid var(--line); border-radius: 12px; background: #eaf0f3; }
 .canvas-wrap.empty { border-style: dashed; }
@@ -67,4 +73,4 @@ canvas { display: block; width: 100%; height: auto; touch-action: none; }
 .advanced { color: var(--ink); }.advanced summary { color: var(--teal-dark); font-weight: 800; cursor: pointer; }.advanced[open] summary { margin-bottom: 10px; }
 footer { margin: 17px 6px 0; color: var(--muted); font-size: .79rem; text-align: center; }
 
-@media (max-width: 390px) { .field-grid, .metrics { grid-template-columns: 1fr; } .hero h1 { font-size: 1.45rem; } .button-row { flex-direction: column; } }
+@media (max-width: 390px) { .field-grid, .metrics { grid-template-columns: 1fr; } .hero h1 { font-size: 1.45rem; } .button-row { flex-direction: column; } .camera-frame, #cameraPreview { min-height: 210px; } }
