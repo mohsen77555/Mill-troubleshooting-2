@@ -33,6 +33,7 @@ jobs:
         run: |
           node tests/mesh-analyzer.test.js
           node tests/auto-inspection.test.js
+          node tests/live-stabilizer.test.js
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -59,11 +60,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.3.0-camera-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.4.0-live-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.3.0-camera-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.3.0-camera-debug.apk
+          name: MeshCheck-Sefar-v0.4.0-live-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.4.0-live-debug.apk
           if-no-files-found: error

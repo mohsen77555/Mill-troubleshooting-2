@@ -1,6 +1,8 @@
 (function () {
   "use strict";
 
+  const ANALYSIS_INTERVAL_MS = 650;
+  const LIVE_MAX_DIMENSION = 1000;
   const video = document.getElementById("cameraPreview");
   const placeholder = document.getElementById("cameraPlaceholder");
   const startButton = document.getElementById("startCamera");
@@ -10,12 +12,32 @@
   const picker = document.getElementById("imagePicker");
   const imageInfo = document.getElementById("imageInfo");
   const autoAnalyzeButton = document.getElementById("autoAnalyze");
+  const materialFilter = document.getElementById("materialFilter");
+  const liveOverlay = document.getElementById("liveOverlay");
+  const liveState = document.getElementById("liveState");
+  const liveCode = document.getElementById("liveCode");
+  const liveConfidence = document.getElementById("liveConfidence");
+  const liveOpening = document.getElementById("liveOpening");
+  const liveMesh = document.getElementById("liveMesh");
+  const livePitch = document.getElementById("livePitch");
+  const liveHint = document.getElementById("liveHint");
+
+  const analysisCanvas = document.createElement("canvas");
+  const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
+  const stabilizer = LiveStabilizer.create({ windowSize: 5, minSamples: 4, toleranceRatio: 0.08 });
 
   let stream = null;
+  let liveTimer = null;
+  let analysisBusy = false;
+  let consecutiveFailures = 0;
 
   startButton.addEventListener("click", startCamera);
   captureButton.addEventListener("click", captureFrame);
   stopButton.addEventListener("click", stopCamera);
+  materialFilter.addEventListener("change", function () {
+    stabilizer.reset();
+    setLiveWaiting("تم تغيير نوع القماش. جارٍ جمع قراءات جديدة...");
+  });
   window.addEventListener("pagehide", stopCamera);
 
   async function startCamera() {
@@ -27,6 +49,7 @@
     stopCamera();
     startButton.disabled = true;
     status.textContent = "جارٍ فتح الكاميرا الخلفية...";
+    setLiveWaiting("جارٍ فتح الكاميرا...");
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -42,12 +65,16 @@
       placeholder.hidden = true;
       captureButton.disabled = false;
       stopButton.disabled = false;
-      status.textContent = "الكاميرا تعمل. اجعل تدريج 1 مم ظاهرًا، ثبّت الجوال ثم اضغط «التقاط وتحليل».";
+      status.textContent = "القياس الحي يعمل. ثبّت الجوال واجعل تدريج 1 مم ظاهرًا داخل الصورة.";
+      stabilizer.reset();
+      consecutiveFailures = 0;
+      scheduleLiveAnalysis(180);
     } catch (error) {
       stream = null;
       placeholder.hidden = false;
       captureButton.disabled = true;
       stopButton.disabled = true;
+      setLiveError("تعذر فتح الكاميرا");
       if (error && (error.name === "NotAllowedError" || error.name === "SecurityError")) {
         status.textContent = "لم يتم السماح بالكاميرا. افتح أذونات التطبيق واسمح باستخدام Camera.";
       } else if (error && error.name === "NotFoundError") {
@@ -61,6 +88,12 @@
   }
 
   function stopCamera() {
+    if (liveTimer) {
+      clearTimeout(liveTimer);
+      liveTimer = null;
+    }
+    analysisBusy = false;
+    stabilizer.reset();
     if (stream) {
       stream.getTracks().forEach(function (track) { track.stop(); });
       stream = null;
@@ -69,6 +102,115 @@
     placeholder.hidden = false;
     captureButton.disabled = true;
     stopButton.disabled = true;
+    setLiveWaiting("افتح الكاميرا ووجّهها إلى القماش.");
+  }
+
+  function scheduleLiveAnalysis(delay) {
+    if (liveTimer) clearTimeout(liveTimer);
+    if (!stream) return;
+    liveTimer = setTimeout(analyzeLiveFrame, delay == null ? ANALYSIS_INTERVAL_MS : delay);
+  }
+
+  function analyzeLiveFrame() {
+    if (!stream) return;
+    if (analysisBusy || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+      scheduleLiveAnalysis();
+      return;
+    }
+
+    analysisBusy = true;
+    try {
+      const scale = Math.min(1, LIVE_MAX_DIMENSION / Math.max(video.videoWidth, video.videoHeight));
+      analysisCanvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      analysisCanvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      analysisContext.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height);
+      const imageData = analysisContext.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height);
+      const inspected = MeshAnalyzer.autoInspect(imageData);
+
+      if (!inspected || !inspected.ok) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 4) stabilizer.reset();
+        setLiveWaiting(inspected && inspected.reason ? inspected.reason : "لم تُقرأ المسطرة/الشبكة بوضوح. ثبّت الجوال وحسّن الإضاءة.");
+        return;
+      }
+
+      consecutiveFailures = 0;
+      const stable = stabilizer.push({
+        pitchMicrons: inspected.pitchMicrons,
+        openingMicrons: inspected.openingMicrons,
+        confidence: inspected.confidence
+      });
+      renderLiveMeasurement(stable);
+    } catch (error) {
+      setLiveError("تعذر التحليل الحي: " + error.message);
+    } finally {
+      analysisBusy = false;
+      scheduleLiveAnalysis();
+    }
+  }
+
+  function renderLiveMeasurement(stable) {
+    if (!stable || !(stable.pitchMicrons > 0)) {
+      setLiveWaiting("جارٍ البحث عن الشبكة...");
+      return;
+    }
+
+    const candidates = SefarCatalog.matchCandidates({
+      pitchMicrons: stable.pitchMicrons,
+      openingMicrons: stable.openingMicrons
+    }, materialFilter.value).slice(0, 3);
+    const best = candidates[0];
+    const threadsPerInch = 25400 / stable.pitchMicrons;
+    const opening = stable.openingMicrons || (best && best.openingMicrons) || null;
+    const confidence = best
+      ? Math.min(99, Math.round((stable.confidence || 0) * 100 * 0.72 + best.confidence * 0.28))
+      : Math.min(99, Math.round((stable.confidence || 0) * 100));
+
+    liveCode.textContent = best ? best.code : "لا توجد مطابقة";
+    liveOpening.textContent = opening ? Math.round(opening) + " µm" : "—";
+    liveMesh.textContent = threadsPerInch.toFixed(1);
+    livePitch.textContent = Math.round(stable.pitchMicrons) + " µm";
+    liveConfidence.textContent = confidence + "%";
+
+    if (!stable.ready) {
+      liveOverlay.className = "live-overlay measuring";
+      liveState.textContent = "جمع القراءات " + stable.samples + "/4";
+      liveHint.textContent = "أبقِ الهاتف ثابتًا حتى يثبت القياس.";
+      return;
+    }
+
+    if (stable.stable) {
+      liveOverlay.className = "live-overlay stable";
+      liveState.textContent = "قراءة مستقرة";
+      liveHint.textContent = "يمكنك الضغط على «تثبيت وتحليل نهائي» للحصول على تقرير الصورة عالية الدقة.";
+    } else {
+      liveOverlay.className = "live-overlay measuring";
+      liveState.textContent = "جارٍ التثبيت";
+      const spread = stable.pitchSpreadRatio == null ? null : Math.round(stable.pitchSpreadRatio * 100);
+      liveHint.textContent = spread == null ? "ثبّت الجوال أكثر." : "تذبذب الـPitch حاليًا " + spread + "% — ثبّت الجوال وحافظ على نفس المسافة.";
+    }
+  }
+
+  function setLiveWaiting(message) {
+    liveOverlay.className = "live-overlay waiting";
+    liveState.textContent = "جارٍ القياس";
+    liveCode.textContent = "—";
+    liveConfidence.textContent = "—";
+    liveOpening.textContent = "—";
+    liveMesh.textContent = "—";
+    livePitch.textContent = "—";
+    liveHint.textContent = message;
+  }
+
+  function setLiveError(message) {
+    liveOverlay.className = "live-overlay error";
+    liveState.textContent = "تعذر القياس";
+    liveCode.textContent = "—";
+    liveConfidence.textContent = "—";
+    liveOpening.textContent = "—";
+    liveMesh.textContent = "—";
+    livePitch.textContent = "—";
+    liveHint.textContent = message;
   }
 
   function captureFrame() {
@@ -78,7 +220,7 @@
     }
 
     captureButton.disabled = true;
-    status.textContent = "جارٍ التقاط الإطار...";
+    status.textContent = "جارٍ تثبيت الإطار عالي الدقة...";
 
     const maximumDimension = 2200;
     const scale = Math.min(1, maximumDimension / Math.max(video.videoWidth, video.videoHeight));
@@ -103,7 +245,7 @@
         const observer = new MutationObserver(function () {
           if (imageInfo.textContent.indexOf("الصورة:") === 0) {
             observer.disconnect();
-            status.textContent = "تم التقاط الصورة. بدأ التحليل التلقائي...";
+            status.textContent = "تم تثبيت الإطار. بدأ التحليل النهائي...";
             window.setTimeout(function () {
               if (!autoAnalyzeButton.disabled) autoAnalyzeButton.click();
             }, 80);
@@ -114,7 +256,6 @@
 
         picker.files = transfer.files;
         picker.dispatchEvent(new Event("change", { bubbles: true }));
-        status.textContent = "تم التقاط إطار بدقة " + captureCanvas.width + " × " + captureCanvas.height + ".";
       } catch (error) {
         status.textContent = "تم التقاط الإطار، لكن تعذر تمريره إلى التحليل: " + error.message;
       } finally {

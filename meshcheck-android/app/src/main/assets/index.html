@@ -12,22 +12,43 @@
     <header class="hero">
       <p class="eyebrow">فحص داخلي للمطحنة - يعمل دون إنترنت</p>
       <h1>MeshCheck Sefar</h1>
-      <p>وجّه الكاميرا إلى المنخل مع تدريج 1 مم، والتقط الإطار ليقيس التطبيق النسيج ويقترح أقرب كود من SEFAR NYTAL.</p>
+      <p>وجّه الكاميرا إلى المنخل مع تدريج 1 مم، وستظهر قراءة الـMesh والفتحة وأقرب كود Sefar مباشرة أثناء التصوير.</p>
     </header>
 
     <section class="notice" aria-label="شرط القياس">
-      <strong>شرط النتيجة:</strong> يجب أن يظهر تدريج <b>1 mm</b> الأسود بوضوح داخل الصورة، وأن يكون القماش مسطحًا والكاميرا عمودية قدر الإمكان. التطبيق يعرض درجة ثقة ولا يعتمد كودًا عند ضعف الصورة.
+      <strong>شرط النتيجة:</strong> يجب أن يظهر تدريج <b>1 mm</b> بوضوح داخل الصورة، وأن يكون القماش مسطحًا والكاميرا عمودية قدر الإمكان. القراءة الحية لا تُثبت النتيجة حتى تتقارب عدة قياسات متتالية.
     </section>
 
     <section class="card workflow camera-card">
-      <div class="step-title"><span>1</span><div><h2>الكاميرا المباشرة</h2><p>افتح الكاميرا الخلفية، ثبّت الجوال فوق المنخل، ثم التقط الإطار. بعد الالتقاط يبدأ التحليل تلقائيًا.</p></div></div>
+      <div class="step-title"><span>1</span><div><h2>القياس الحي بالكاميرا</h2><p>افتح الكاميرا الخلفية وثبّت الجوال فوق المنخل. التحليل يبدأ تلقائيًا، ويمكنك التقاط إطار نهائي عالي الدقة عند ظهور قراءة مستقرة.</p></div></div>
       <div class="camera-frame">
         <video id="cameraPreview" autoplay playsinline muted></video>
-        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا» لبدء المعاينة المباشرة.</div>
+        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا» لبدء القياس الحي.</div>
+        <div class="ruler-guide" aria-hidden="true"><span>اجعل تدريج 1 mm ظاهرًا هنا</span></div>
+        <div id="liveOverlay" class="live-overlay waiting">
+          <div class="live-state"><span id="liveStateDot"></span><strong id="liveState">بانتظار الكاميرا</strong></div>
+          <div class="live-main"><strong id="liveCode">—</strong><span id="liveConfidence">—</span></div>
+          <div class="live-metrics">
+            <div><span>Opening</span><strong id="liveOpening">—</strong></div>
+            <div><span>Mesh/in</span><strong id="liveMesh">—</strong></div>
+            <div><span>Pitch</span><strong id="livePitch">—</strong></div>
+          </div>
+          <small id="liveHint">افتح الكاميرا ووجّهها إلى القماش.</small>
+        </div>
+      </div>
+      <div class="field-grid one-row live-material">
+        <label>نوع القماش المتوقع
+          <select id="materialFilter">
+            <option value="Auto">تلقائي - اعرض الاحتمالات</option>
+            <option value="PA">PA - بولي أميد / نايلون</option>
+            <option value="PET">PET - بوليستر</option>
+            <option value="Metal">Metal - ستانلس ستيل</option>
+          </select>
+        </label>
       </div>
       <div class="button-row camera-controls">
         <button id="startCamera" type="button">فتح الكاميرا</button>
-        <button id="captureCamera" class="primary" type="button" disabled>التقاط وتحليل</button>
+        <button id="captureCamera" class="primary" type="button" disabled>تثبيت وتحليل نهائي</button>
         <button id="stopCamera" class="secondary" type="button" disabled>إيقاف</button>
       </div>
       <p id="cameraStatus" class="helper">الكاميرا متوقفة. عند أول استخدام سيطلب أندرويد إذن الكاميرا.</p>
@@ -40,35 +61,25 @@
     </section>
 
     <section class="card workflow">
-      <div class="step-title"><span>2</span><div><h2>التعرف التلقائي</h2><p>يقرأ التطبيق مسافة تدريج 1 مم، وعدد الخيوط، والفتحة، ثم يقارنها بجدول Sefar.</p></div></div>
-      <div class="field-grid one-row">
-        <label>نوع القماش المتوقع
-          <select id="materialFilter">
-            <option value="Auto">تلقائي - اعرض الاحتمالات</option>
-            <option value="PA">PA - بولي أميد / نايلون</option>
-            <option value="PET">PET - بوليستر</option>
-            <option value="Metal">Metal - ستانلس ستيل</option>
-          </select>
-        </label>
-      </div>
-      <button id="autoAnalyze" class="primary wide" type="button">تحليل تلقائي ومطابقة Sefar</button>
-      <p id="autoStatus" class="helper">التقط صورة بالكاميرا أو اختر صورة أولًا.</p>
+      <div class="step-title"><span>2</span><div><h2>التحليل النهائي للصورة</h2><p>بعد تثبيت إطار من الكاميرا أو اختيار صورة، يقرأ التطبيق المعايرة بدقة أعلى ويعرض أقرب احتمالات Sefar.</p></div></div>
+      <button id="autoAnalyze" class="primary wide" type="button">تحليل الصورة ومطابقة Sefar</button>
+      <p id="autoStatus" class="helper">التقط إطارًا نهائيًا أو اختر صورة أولًا.</p>
     </section>
 
     <section class="card canvas-card">
       <div class="canvas-heading">
-        <h2>صورة الفحص</h2>
+        <h2>صورة الفحص النهائية</h2>
         <span id="statusBadge" class="badge">بانتظار صورة</span>
       </div>
       <div id="canvasWrap" class="canvas-wrap empty">
         <canvas id="imageCanvas" aria-label="صورة المنخل للتحليل"></canvas>
-        <p id="canvasPlaceholder">التقط إطارًا من الكاميرا أو اختر صورة للمنخل.</p>
+        <p id="canvasPlaceholder">ثبّت إطارًا من الكاميرا أو اختر صورة للمنخل.</p>
       </div>
       <p class="legend"><i class="green"></i> فتحات مكتشفة <i class="blue"></i> معايرة يدوية <i class="amber"></i> تحذير جودة الصورة</p>
     </section>
 
     <section class="card results" aria-live="polite">
-      <div class="results-heading"><h2>نتيجة Sefar</h2><span id="qualityLabel" class="quality neutral">لا توجد نتيجة</span></div>
+      <div class="results-heading"><h2>نتيجة Sefar النهائية</h2><span id="qualityLabel" class="quality neutral">لا توجد نتيجة</span></div>
       <div class="primary-result">
         <span>أقرب كود</span>
         <strong id="codeMetric">—</strong>
@@ -116,13 +127,14 @@
         </label>
       </div>
       <button id="manualAnalyze" class="secondary wide" type="button">قياس الفتحات يدويًا</button>
-      <p id="calibrationStatus" class="helper">التقط أو اختر صورة ثم عايرها بنقطتين على طول معروف.</p>
+      <p id="calibrationStatus" class="helper">ثبّت أو اختر صورة ثم عايرها بنقطتين على طول معروف.</p>
     </details>
 
-    <footer>النتيجة أداة فحص داخلية. قبل شراء كمية أو تغيير منخل التشغيل، تحقق من المقاس بعينة Sefar أو قياس بصري معاير.</footer>
+    <footer>القراءة الحية أداة فحص داخلية. قبل شراء كمية أو تغيير منخل التشغيل، ثبّت إطارًا نهائيًا وتحقق من المقاس بعينة Sefar أو قياس بصري معاير.</footer>
   </main>
   <script src="sefar-catalog.js"></script>
   <script src="mesh-analyzer.js"></script>
+  <script src="live-stabilizer.js"></script>
   <script src="app.js"></script>
   <script src="camera-live.js"></script>
 </body>
