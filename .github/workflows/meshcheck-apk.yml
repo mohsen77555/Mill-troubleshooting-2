@@ -34,6 +34,7 @@ jobs:
           node tests/mesh-analyzer.test.js
           node tests/auto-inspection.test.js
           node tests/live-stabilizer.test.js
+          node tests/sefar-catalog-source.test.js
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -60,11 +61,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.7.0-fixed-distance-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.7.0-fixed-distance-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.7.0-fixed-distance-debug.apk
+          name: MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug.apk
           if-no-files-found: error
