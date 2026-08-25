@@ -42,6 +42,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Test centered 1 cm thread counter
+        run: |
+          mkdir -p build/thread-counter-test
+          javac -d build/thread-counter-test app/src/main/java/com/alhadi/meshcheck/ThreadProfileCounter.java tests/ThreadProfileCounterTest.java
+          java -cp build/thread-counter-test ThreadProfileCounterTest
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -61,11 +67,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.9.0-1cm-thread-count-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.8.0-PDF-only-catalog-debug.apk
+          name: MeshCheck-Sefar-v0.9.0-1cm-thread-count-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.9.0-1cm-thread-count-debug.apk
           if-no-files-found: error
