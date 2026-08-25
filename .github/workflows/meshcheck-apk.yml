@@ -60,11 +60,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.4.0-live-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.5.0-native-camera-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.4.0-live-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.4.0-live-debug.apk
+          name: MeshCheck-Sefar-v0.5.0-native-camera-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.5.0-native-camera-debug.apk
           if-no-files-found: error

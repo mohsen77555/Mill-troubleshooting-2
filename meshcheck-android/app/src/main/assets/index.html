@@ -12,19 +12,18 @@
     <header class="hero">
       <p class="eyebrow">فحص داخلي للمطحنة - يعمل دون إنترنت</p>
       <h1>MeshCheck Sefar</h1>
-      <p>وجّه الكاميرا إلى المنخل مع تدريج 1 مم، وستظهر قراءة الـMesh والفتحة وأقرب كود Sefar مباشرة أثناء التصوير.</p>
+      <p>افتح كاميرا Android الأصلية، صوّر المنخل، ثم يحلل التطبيق الفتحة والـPitch ويقترح أقرب كود Sefar.</p>
     </header>
 
     <section class="notice" aria-label="شرط القياس">
-      <strong>شرط النتيجة:</strong> يجب أن يظهر تدريج <b>1 mm</b> بوضوح داخل الصورة، وأن يكون القماش مسطحًا والكاميرا عمودية قدر الإمكان. القراءة الحية لا تُثبت النتيجة حتى تتقارب عدة قياسات متتالية.
+      <strong>مهم:</strong> ستظهر داخل الكاميرا مسطرة <b>1 cm = 10 mm</b> على شاشة الهاتف. هذه مفيدة كمرجع بصري، لكنها لا تعاير جسمًا داخل صورة الكاميرا لأن حجم الجسم يتغير مع المسافة. لقياس µm بدقة استخدم تدريجًا حقيقيًا في نفس مستوى المنخل أو معايرة ثابتة للمسافة.
     </section>
 
     <section class="card workflow camera-card">
-      <div class="step-title"><span>1</span><div><h2>القياس الحي بالكاميرا</h2><p>افتح الكاميرا الخلفية وثبّت الجوال فوق المنخل. التحليل يبدأ تلقائيًا، ويمكنك التقاط إطار نهائي عالي الدقة عند ظهور قراءة مستقرة.</p></div></div>
+      <div class="step-title"><span>1</span><div><h2>كاميرا Android الأصلية</h2><p>زر فتح الكاميرا يستخدم CameraX مباشرة بدل WebView. ستظهر مسطرة 1 cm، علامة محاذاة، وزر Flash.</p></div></div>
       <div class="camera-frame">
         <video id="cameraPreview" autoplay playsinline muted></video>
-        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا» لبدء القياس الحي.</div>
-        <div class="ruler-guide" aria-hidden="true"><span>اجعل تدريج 1 mm ظاهرًا هنا</span></div>
+        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا». ستفتح الكاميرا بملء الشاشة.</div>
         <div id="liveOverlay" class="live-overlay waiting">
           <div class="live-state"><span id="liveStateDot"></span><strong id="liveState">بانتظار الكاميرا</strong></div>
           <div class="live-main"><strong id="liveCode">—</strong><span id="liveConfidence">—</span></div>
@@ -33,7 +32,7 @@
             <div><span>Mesh/in</span><strong id="liveMesh">—</strong></div>
             <div><span>Pitch</span><strong id="livePitch">—</strong></div>
           </div>
-          <small id="liveHint">افتح الكاميرا ووجّهها إلى القماش.</small>
+          <small id="liveHint">افتح الكاميرا ثم التقط صورة للتحليل.</small>
         </div>
       </div>
       <div class="field-grid one-row live-material">
@@ -48,38 +47,38 @@
       </div>
       <div class="button-row camera-controls">
         <button id="startCamera" type="button">فتح الكاميرا</button>
-        <button id="captureCamera" class="primary" type="button" disabled>تثبيت وتحليل نهائي</button>
+        <button id="captureCamera" class="primary" type="button" disabled>التقاط من WebView</button>
         <button id="stopCamera" class="secondary" type="button" disabled>إيقاف</button>
       </div>
-      <p id="cameraStatus" class="helper">الكاميرا متوقفة. عند أول استخدام سيطلب أندرويد إذن الكاميرا.</p>
+      <p id="cameraStatus" class="helper">عند أول استخدام سيطلب Android إذن الكاميرا.</p>
       <div class="camera-divider"><span>أو</span></div>
       <label class="upload" for="imagePicker">
         <input id="imagePicker" type="file" accept="image/*">
-        <span>اختيار صورة موجودة بدل الكاميرا</span>
+        <span>اختيار صورة موجودة</span>
       </label>
       <p id="imageInfo" class="helper">لم يتم التقاط أو اختيار صورة بعد.</p>
     </section>
 
     <section class="card workflow">
-      <div class="step-title"><span>2</span><div><h2>التحليل النهائي للصورة</h2><p>بعد تثبيت إطار من الكاميرا أو اختيار صورة، يقرأ التطبيق المعايرة بدقة أعلى ويعرض أقرب احتمالات Sefar.</p></div></div>
+      <div class="step-title"><span>2</span><div><h2>التحليل النهائي للصورة</h2><p>بعد التصوير أو اختيار صورة، يقرأ التطبيق المعايرة ويعرض أقرب احتمالات Sefar.</p></div></div>
       <button id="autoAnalyze" class="primary wide" type="button">تحليل الصورة ومطابقة Sefar</button>
-      <p id="autoStatus" class="helper">التقط إطارًا نهائيًا أو اختر صورة أولًا.</p>
+      <p id="autoStatus" class="helper">التقط صورة أو اختر صورة أولًا.</p>
     </section>
 
     <section class="card canvas-card">
       <div class="canvas-heading">
-        <h2>صورة الفحص النهائية</h2>
+        <h2>صورة الفحص</h2>
         <span id="statusBadge" class="badge">بانتظار صورة</span>
       </div>
       <div id="canvasWrap" class="canvas-wrap empty">
         <canvas id="imageCanvas" aria-label="صورة المنخل للتحليل"></canvas>
-        <p id="canvasPlaceholder">ثبّت إطارًا من الكاميرا أو اختر صورة للمنخل.</p>
+        <p id="canvasPlaceholder">التقط صورة بالكاميرا أو اختر صورة للمنخل.</p>
       </div>
       <p class="legend"><i class="green"></i> فتحات مكتشفة <i class="blue"></i> معايرة يدوية <i class="amber"></i> تحذير جودة الصورة</p>
     </section>
 
     <section class="card results" aria-live="polite">
-      <div class="results-heading"><h2>نتيجة Sefar النهائية</h2><span id="qualityLabel" class="quality neutral">لا توجد نتيجة</span></div>
+      <div class="results-heading"><h2>نتيجة Sefar</h2><span id="qualityLabel" class="quality neutral">لا توجد نتيجة</span></div>
       <div class="primary-result">
         <span>أقرب كود</span>
         <strong id="codeMetric">—</strong>
@@ -127,10 +126,10 @@
         </label>
       </div>
       <button id="manualAnalyze" class="secondary wide" type="button">قياس الفتحات يدويًا</button>
-      <p id="calibrationStatus" class="helper">ثبّت أو اختر صورة ثم عايرها بنقطتين على طول معروف.</p>
+      <p id="calibrationStatus" class="helper">التقط أو اختر صورة ثم عايرها بنقطتين على طول معروف.</p>
     </details>
 
-    <footer>القراءة الحية أداة فحص داخلية. قبل شراء كمية أو تغيير منخل التشغيل، ثبّت إطارًا نهائيًا وتحقق من المقاس بعينة Sefar أو قياس بصري معاير.</footer>
+    <footer>مسطرة 1 cm على الشاشة مرجع بصري فقط. القياس الهندسي داخل الصورة يحتاج مرجعًا حقيقيًا أو معايرة ثابتة للمسافة.</footer>
   </main>
   <script src="sefar-catalog.js"></script>
   <script src="mesh-analyzer.js"></script>

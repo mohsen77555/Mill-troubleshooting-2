@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -21,18 +22,24 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Native shell for MeshCheck. The app stays offline; WebViewAssetLoader gives the
- * bundled UI a secure HTTPS origin so getUserMedia can use the phone camera.
+ * Native shell for MeshCheck. The app stays offline. The primary camera flow is
+ * now a native CameraX activity; WebView camera remains only as a browser fallback.
  */
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1101;
     private static final int CSV_EXPORT_REQUEST = 1102;
     private static final int CAMERA_PERMISSION_REQUEST = 1103;
+    private static final int NATIVE_CAMERA_REQUEST = 1104;
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
@@ -68,6 +75,7 @@ public class MainActivity extends Activity {
         });
 
         webView.addJavascriptInterface(new ExportBridge(), "MeshExport");
+        webView.addJavascriptInterface(new NativeCameraBridge(), "MeshNativeCamera");
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(
@@ -103,6 +111,15 @@ public class MainActivity extends Activity {
         });
 
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+    }
+
+    private void launchNativeCamera() {
+        try {
+            Intent intent = new Intent(this, NativeCameraActivity.class);
+            startActivityForResult(intent, NATIVE_CAMERA_REQUEST);
+        } catch (Exception exception) {
+            Toast.makeText(this, "تعذر فتح الكاميرا الأصلية: " + exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void handleWebPermissionRequest(PermissionRequest request) {
@@ -153,6 +170,18 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
+        if (requestCode == NATIVE_CAMERA_REQUEST) {
+            if (resultCode == RESULT_OK && data != null) {
+                String capturePath = data.getStringExtra(NativeCameraActivity.EXTRA_CAPTURE_PATH);
+                if (capturePath != null) {
+                    deliverNativeCapture(capturePath);
+                }
+            } else if (webView != null) {
+                webView.evaluateJavascript("window.MeshCheckNativeCameraCanceled && window.MeshCheckNativeCameraCanceled();", null);
+            }
+            return;
+        }
+
         if (requestCode == FILE_CHOOSER_REQUEST) {
             if (filePathCallback == null) {
                 return;
@@ -179,6 +208,34 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void deliverNativeCapture(String capturePath) {
+        File file = new File(capturePath);
+        if (!file.isFile()) {
+            Toast.makeText(this, "لم يتم العثور على صورة الكاميرا.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        try (FileInputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            String base64 = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+            String dataUrl = "data:image/jpeg;base64," + base64;
+            String script = "window.MeshCheckNativeCameraResult && window.MeshCheckNativeCameraResult("
+                    + JSONObject.quote(dataUrl) + "," + JSONObject.quote(file.getName()) + ");";
+            webView.evaluateJavascript(script, null);
+        } catch (IOException exception) {
+            Toast.makeText(this, "تعذر قراءة صورة الكاميرا.", Toast.LENGTH_LONG).show();
+        } finally {
+            // The WebView has received its own copy; keep cache clean.
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+        }
+    }
+
     @Override
     public void onBackPressed() {
         if (webView != null && webView.canGoBack()) {
@@ -198,6 +255,13 @@ public class MainActivity extends Activity {
             webView.destroy();
         }
         super.onDestroy();
+    }
+
+    private final class NativeCameraBridge {
+        @JavascriptInterface
+        public void open() {
+            runOnUiThread(MainActivity.this::launchNativeCamera);
+        }
     }
 
     private final class ExportBridge {

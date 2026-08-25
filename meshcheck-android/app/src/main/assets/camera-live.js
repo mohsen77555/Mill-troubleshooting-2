@@ -40,9 +40,55 @@
   });
   window.addEventListener("pagehide", stopCamera);
 
+  window.MeshCheckNativeCameraResult = function (dataUrl, fileName) {
+    stopCamera();
+    try {
+      const blob = dataUrlToBlob(dataUrl);
+      const file = new File([blob], fileName || ("meshcheck-native-" + Date.now() + ".jpg"), { type: "image/jpeg" });
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      picker.files = transfer.files;
+
+      const observer = new MutationObserver(function () {
+        if (imageInfo.textContent.indexOf("الصورة:") === 0) {
+          observer.disconnect();
+          status.textContent = "تم التقاط الصورة بالكاميرا الأصلية. بدأ التحليل تلقائيًا.";
+          window.setTimeout(function () {
+            if (!autoAnalyzeButton.disabled) autoAnalyzeButton.click();
+          }, 100);
+        }
+      });
+      observer.observe(imageInfo, { childList: true, characterData: true, subtree: true });
+      window.setTimeout(function () { observer.disconnect(); }, 5000);
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch (error) {
+      status.textContent = "تم التقاط الصورة، لكن تعذر تمريرها للتحليل: " + error.message;
+    }
+  };
+
+  window.MeshCheckNativeCameraCanceled = function () {
+    status.textContent = "تم إغلاق الكاميرا بدون التقاط صورة.";
+  };
+
+  function dataUrlToBlob(dataUrl) {
+    const parts = dataUrl.split(",");
+    const mime = (parts[0].match(/data:([^;]+)/) || [null, "image/jpeg"])[1];
+    const binary = atob(parts[1]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: mime });
+  }
+
   async function startCamera() {
+    if (window.MeshNativeCamera && typeof window.MeshNativeCamera.open === "function") {
+      status.textContent = "جارٍ فتح كاميرا Android الأصلية...";
+      setLiveWaiting("ستفتح الكاميرا بملء الشاشة مع مسطرة 1 cm وFlash.");
+      window.MeshNativeCamera.open();
+      return;
+    }
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      status.textContent = "هذا الجهاز لا يتيح الكاميرا المباشرة داخل التطبيق. استخدم اختيار صورة بدلًا منها.";
+      status.textContent = "هذا الجهاز لا يتيح الكاميرا المباشرة داخل المتصفح. استخدم اختيار صورة بدلًا منها.";
       return;
     }
 
@@ -75,13 +121,7 @@
       captureButton.disabled = true;
       stopButton.disabled = true;
       setLiveError("تعذر فتح الكاميرا");
-      if (error && (error.name === "NotAllowedError" || error.name === "SecurityError")) {
-        status.textContent = "لم يتم السماح بالكاميرا. افتح أذونات التطبيق واسمح باستخدام Camera.";
-      } else if (error && error.name === "NotFoundError") {
-        status.textContent = "لم يتم العثور على كاميرا في الجهاز.";
-      } else {
-        status.textContent = "تعذر فتح الكاميرا: " + ((error && error.message) || "خطأ غير معروف") + ". يمكنك اختيار صورة بدلًا منها.";
-      }
+      status.textContent = "تعذر فتح الكاميرا داخل WebView. استخدم الكاميرا الأصلية أو اختيار صورة.";
     } finally {
       startButton.disabled = false;
     }
@@ -215,13 +255,12 @@
 
   function captureFrame() {
     if (!stream || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-      status.textContent = "الكاميرا لم تصبح جاهزة بعد.";
+      status.textContent = "استخدم زر «فتح الكاميرا» لفتح كاميرا Android الأصلية.";
       return;
     }
 
     captureButton.disabled = true;
     status.textContent = "جارٍ تثبيت الإطار عالي الدقة...";
-
     const maximumDimension = 2200;
     const scale = Math.min(1, maximumDimension / Math.max(video.videoWidth, video.videoHeight));
     const captureCanvas = document.createElement("canvas");
@@ -229,38 +268,17 @@
     captureCanvas.height = Math.max(1, Math.round(video.videoHeight * scale));
     const captureContext = captureCanvas.getContext("2d");
     captureContext.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-
     captureCanvas.toBlob(function (blob) {
       if (!blob) {
-        status.textContent = "تعذر إنشاء صورة من الكاميرا.";
         captureButton.disabled = false;
         return;
       }
-
-      try {
-        const file = new File([blob], "meshcheck-camera-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        const transfer = new DataTransfer();
-        transfer.items.add(file);
-
-        const observer = new MutationObserver(function () {
-          if (imageInfo.textContent.indexOf("الصورة:") === 0) {
-            observer.disconnect();
-            status.textContent = "تم تثبيت الإطار. بدأ التحليل النهائي...";
-            window.setTimeout(function () {
-              if (!autoAnalyzeButton.disabled) autoAnalyzeButton.click();
-            }, 80);
-          }
-        });
-        observer.observe(imageInfo, { childList: true, characterData: true, subtree: true });
-        window.setTimeout(function () { observer.disconnect(); }, 5000);
-
-        picker.files = transfer.files;
-        picker.dispatchEvent(new Event("change", { bubbles: true }));
-      } catch (error) {
-        status.textContent = "تم التقاط الإطار، لكن تعذر تمريره إلى التحليل: " + error.message;
-      } finally {
-        captureButton.disabled = false;
-      }
+      const file = new File([blob], "meshcheck-camera-" + Date.now() + ".jpg", { type: "image/jpeg" });
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      picker.files = transfer.files;
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+      captureButton.disabled = false;
     }, "image/jpeg", 0.96);
   }
 })();
