@@ -31,10 +31,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
-/**
- * Native shell for MeshCheck. The app stays offline. The primary camera flow is
- * now a native CameraX activity; WebView camera remains only as a browser fallback.
- */
+/** Native shell for MeshCheck. */
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1101;
     private static final int CSV_EXPORT_REQUEST = 1102;
@@ -104,9 +101,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPermissionRequestCanceled(PermissionRequest request) {
-                if (pendingCameraPermissionRequest == request) {
-                    pendingCameraPermissionRequest = null;
-                }
+                if (pendingCameraPermissionRequest == request) pendingCameraPermissionRequest = null;
             }
         });
 
@@ -130,20 +125,15 @@ public class MainActivity extends Activity {
                 break;
             }
         }
-
         if (!wantsVideo) {
             request.deny();
             return;
         }
-
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
             return;
         }
-
-        if (pendingCameraPermissionRequest != null) {
-            pendingCameraPermissionRequest.deny();
-        }
+        if (pendingCameraPermissionRequest != null) pendingCameraPermissionRequest.deny();
         pendingCameraPermissionRequest = request;
         requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
     }
@@ -151,9 +141,7 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != CAMERA_PERMISSION_REQUEST || pendingCameraPermissionRequest == null) {
-            return;
-        }
+        if (requestCode != CAMERA_PERMISSION_REQUEST || pendingCameraPermissionRequest == null) return;
 
         PermissionRequest request = pendingCameraPermissionRequest;
         pendingCameraPermissionRequest = null;
@@ -173,9 +161,7 @@ public class MainActivity extends Activity {
         if (requestCode == NATIVE_CAMERA_REQUEST) {
             if (resultCode == RESULT_OK && data != null) {
                 String capturePath = data.getStringExtra(NativeCameraActivity.EXTRA_CAPTURE_PATH);
-                if (capturePath != null) {
-                    deliverNativeCapture(capturePath);
-                }
+                if (capturePath != null) deliverNativeCapture(capturePath, data);
             } else if (webView != null) {
                 webView.evaluateJavascript("window.MeshCheckNativeCameraCanceled && window.MeshCheckNativeCameraCanceled();", null);
             }
@@ -183,9 +169,7 @@ public class MainActivity extends Activity {
         }
 
         if (requestCode == FILE_CHOOSER_REQUEST) {
-            if (filePathCallback == null) {
-                return;
-            }
+            if (filePathCallback == null) return;
             Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
             filePathCallback.onReceiveValue(result);
             filePathCallback = null;
@@ -195,9 +179,7 @@ public class MainActivity extends Activity {
         if (requestCode == CSV_EXPORT_REQUEST) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null && pendingCsv != null) {
                 try (OutputStream stream = getContentResolver().openOutputStream(data.getData())) {
-                    if (stream == null) {
-                        throw new IOException("Output stream unavailable");
-                    }
+                    if (stream == null) throw new IOException("Output stream unavailable");
                     stream.write(pendingCsv.getBytes(StandardCharsets.UTF_8));
                     Toast.makeText(this, "تم حفظ ملف CSV.", Toast.LENGTH_SHORT).show();
                 } catch (IOException exception) {
@@ -208,7 +190,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void deliverNativeCapture(String capturePath) {
+    private void deliverNativeCapture(String capturePath, Intent captureData) {
         File file = new File(capturePath);
         if (!file.isFile()) {
             Toast.makeText(this, "لم يتم العثور على صورة الكاميرا.", Toast.LENGTH_LONG).show();
@@ -219,18 +201,38 @@ public class MainActivity extends Activity {
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
             int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-            }
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+
             String base64 = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
             String dataUrl = "data:image/jpeg;base64," + base64;
-            String script = "window.MeshCheckNativeCameraResult && window.MeshCheckNativeCameraResult("
+
+            float threadCountCm = captureData.getFloatExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_CM, 0f);
+            int fullLineCount = captureData.getIntExtra(NativeCameraActivity.EXTRA_FULL_LINE_COUNT, 0);
+            float countConfidence = captureData.getFloatExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_CONFIDENCE, 0f);
+            boolean countStable = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_STABLE, false);
+            boolean fixedCalibrated = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_FIXED_CALIBRATED, false);
+            float fixedDistanceCm = captureData.getFloatExtra(NativeCameraActivity.EXTRA_FIXED_DISTANCE_CM, 0f);
+            float zoomRatio = captureData.getFloatExtra(NativeCameraActivity.EXTRA_ZOOM_RATIO, 1f);
+
+            JSONObject measurement = new JSONObject();
+            measurement.put("valid", fixedCalibrated && threadCountCm > 0f && fullLineCount > 0);
+            measurement.put("source", "centered_1cm_full_line_count");
+            measurement.put("threadsPerCm", threadCountCm);
+            measurement.put("threadsPerInch", threadCountCm * 2.54f);
+            measurement.put("fullLinesInOneCm", fullLineCount);
+            measurement.put("confidence", countConfidence);
+            measurement.put("stable", countStable);
+            measurement.put("fixedDistanceCm", fixedDistanceCm);
+            measurement.put("zoomRatio", zoomRatio);
+
+            String script = "window.MeshCheckNativeMeasurement=" + measurement.toString() + ";"
+                    + "window.MeshCheckNativeMeasurementPending=true;"
+                    + "window.MeshCheckNativeCameraResult && window.MeshCheckNativeCameraResult("
                     + JSONObject.quote(dataUrl) + "," + JSONObject.quote(file.getName()) + ");";
             webView.evaluateJavascript(script, null);
-        } catch (IOException exception) {
-            Toast.makeText(this, "تعذر قراءة صورة الكاميرا.", Toast.LENGTH_LONG).show();
+        } catch (Exception exception) {
+            Toast.makeText(this, "تعذر قراءة نتيجة الكاميرا: " + exception.getMessage(), Toast.LENGTH_LONG).show();
         } finally {
-            // The WebView has received its own copy; keep cache clean.
             //noinspection ResultOfMethodCallIgnored
             file.delete();
         }
@@ -238,11 +240,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
     }
 
     @Override
@@ -251,9 +250,7 @@ public class MainActivity extends Activity {
             pendingCameraPermissionRequest.deny();
             pendingCameraPermissionRequest = null;
         }
-        if (webView != null) {
-            webView.destroy();
-        }
+        if (webView != null) webView.destroy();
         super.onDestroy();
     }
 
