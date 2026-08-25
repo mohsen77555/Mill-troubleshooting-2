@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#123b50">
+  <title>MeshCheck Sefar</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">فحص داخلي للمطحنة - يعمل دون إنترنت</p>
+      <h1>MeshCheck Sefar</h1>
+      <p>صوّر المنخل مع تدريج 1 مم، وسيقيس التطبيق النسيج ويقترح أقرب كود من SEFAR NYTAL.</p>
+    </header>
+
+    <section class="notice" aria-label="شرط القياس">
+      <strong>شرط النتيجة:</strong> يجب أن يظهر تدريج <b>1 mm</b> الأسود بوضوح في أعلى الصورة، وأن يكون القماش مسطحًا والكاميرا عمودية قدر الإمكان. التطبيق يعرض درجة ثقة ولا يعتمد كودًا عند ضعف الصورة.
+    </section>
+
+    <section class="card workflow">
+      <div class="step-title"><span>1</span><div><h2>التقاط الصورة</h2><p>صوّر القماش داخل إطار القياس نفسه، أو اختر صورة موجودة.</p></div></div>
+      <label class="upload" for="imagePicker">
+        <input id="imagePicker" type="file" accept="image/*" capture="environment">
+        <span>التقاط / اختيار صورة المنخل</span>
+      </label>
+      <p id="imageInfo" class="helper">لم يتم اختيار صورة بعد.</p>
+    </section>
+
+    <section class="card workflow">
+      <div class="step-title"><span>2</span><div><h2>التعرف التلقائي</h2><p>يقرأ التطبيق مسافة تدريج 1 مم، وعدد الخيوط، والفتحة، ثم يقارنها بجدول Sefar.</p></div></div>
+      <div class="field-grid one-row">
+        <label>نوع القماش المتوقع
+          <select id="materialFilter">
+            <option value="Auto">تلقائي - اعرض الاحتمالات</option>
+            <option value="PA">PA - بولي أميد / نايلون</option>
+            <option value="PET">PET - بوليستر</option>
+            <option value="Metal">Metal - ستانلس ستيل</option>
+          </select>
+        </label>
+      </div>
+      <button id="autoAnalyze" class="primary wide" type="button">تحليل تلقائي ومطابقة Sefar</button>
+      <p id="autoStatus" class="helper">اختر صورة أولًا.</p>
+    </section>
+
+    <section class="card canvas-card">
+      <div class="canvas-heading">
+        <h2>صورة الفحص</h2>
+        <span id="statusBadge" class="badge">بانتظار صورة</span>
+      </div>
+      <div id="canvasWrap" class="canvas-wrap empty">
+        <canvas id="imageCanvas" aria-label="صورة المنخل للتحليل"></canvas>
+        <p id="canvasPlaceholder">اختر صورة للمنخل مع تدريج 1 مم ظاهر في الأعلى.</p>
+      </div>
+      <p class="legend"><i class="green"></i> فتحات مكتشفة <i class="blue"></i> معايرة يدوية <i class="amber"></i> تحذير جودة الصورة</p>
+    </section>
+
+    <section class="card results" aria-live="polite">
+      <div class="results-heading"><h2>نتيجة Sefar</h2><span id="qualityLabel" class="quality neutral">لا توجد نتيجة</span></div>
+      <div class="primary-result">
+        <span>أقرب كود</span>
+        <strong id="codeMetric">—</strong>
+        <small id="materialMetric">—</small>
+      </div>
+      <div class="metrics">
+        <div><span>الفتحة الصافية</span><strong id="openingMetric">—</strong></div>
+        <div><span>Pitch (خيط إلى خيط)</span><strong id="pitchMetric">—</strong></div>
+        <div><span>عدد الخيوط</span><strong id="threadMetric">—</strong></div>
+        <div><span>الثقة</span><strong id="confidenceMetric">—</strong></div>
+      </div>
+      <p id="resultSummary" class="summary">بعد التحليل ستظهر هنا نتيجة القياس والمطابقة.</p>
+      <ul id="warnings" class="warnings" hidden></ul>
+      <div id="candidateBox" class="candidates" hidden>
+        <h3>أقرب احتمالات Sefar</h3>
+        <div id="candidateList"></div>
+      </div>
+      <div class="button-row">
+        <button id="copyReport" class="secondary" type="button" disabled>نسخ التقرير</button>
+        <button id="exportCsv" class="secondary" type="button" disabled>حفظ CSV</button>
+      </div>
+    </section>
+
+    <details class="card advanced">
+      <summary>معايرة وتحليل يدوي متقدم</summary>
+      <p class="helper">استخدمه إذا كانت المسطرة غير ظاهرة أو إذا أعطى التحليل التلقائي ثقة منخفضة.</p>
+      <div class="field-grid">
+        <label>طول المرجع (µm)
+          <input id="referenceMicrons" inputmode="decimal" type="number" min="0.01" step="0.01" value="1000">
+        </label>
+        <label>µm لكل بكسل
+          <input id="micronsPerPixel" inputmode="decimal" type="number" min="0.0001" step="0.0001" placeholder="يُحسب تلقائيًا">
+        </label>
+      </div>
+      <div class="button-row">
+        <button id="startCalibration" class="secondary" type="button">اختيار نقطتي المعايرة</button>
+        <button id="applyCalibration" type="button">اعتماد المعايرة</button>
+      </div>
+      <div class="field-grid">
+        <label>أقل مساحة للفتحة (بكسل²)
+          <input id="minArea" inputmode="numeric" type="number" min="1" step="1" value="25">
+        </label>
+        <label>الفتحات
+          <select id="openingsBright"><option value="dark">داكنة على خلفية مضيئة</option><option value="bright">مضيئة من الخلف</option></select>
+        </label>
+      </div>
+      <button id="manualAnalyze" class="secondary wide" type="button">قياس الفتحات يدويًا</button>
+      <p id="calibrationStatus" class="helper">اختر صورتك ثم عايرها بنقطتين على طول معروف.</p>
+    </details>
+
+    <footer>النتيجة أداة فحص داخلية. قبل شراء كمية أو تغيير منخل التشغيل، تحقق من المقاس بعينة Sefar أو قياس بصري معاير.</footer>
+  </main>
+  <script src="sefar-catalog.js"></script>
+  <script src="mesh-analyzer.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
