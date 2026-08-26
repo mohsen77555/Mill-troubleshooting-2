@@ -1,20 +1,13 @@
 package com.alhadi.meshcheck;
 
 import android.Manifest;
-import android.app.AlertDialog;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.RectF;
-import android.hardware.camera2.CameraCaptureSession;
-import android.hardware.camera2.CaptureResult;
-import android.hardware.camera2.TotalCaptureResult;
+import android.graphics.Path;
 import android.os.Bundle;
-import android.text.InputType;
-import android.util.DisplayMetrics;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -22,7 +15,6 @@ import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -30,7 +22,6 @@ import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
-import androidx.camera.camera2.interop.Camera2Interop;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.FocusMeteringAction;
@@ -55,10 +46,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-/**
- * CameraX measurement screen.
- * v0.13: one base 1 cm calibration, then automatic ruler scaling from zoom + distance.
- */
+/** v0.14: automatic 20x20 mm physical marker mode. */
 public class NativeCameraActivity extends ComponentActivity {
     public static final String EXTRA_CAPTURE_PATH = "meshcheck.capture_path";
     public static final String EXTRA_ZOOM_RATIO = "meshcheck.zoom_ratio";
@@ -69,81 +57,47 @@ public class NativeCameraActivity extends ComponentActivity {
     public static final String EXTRA_FULL_LINE_COUNT = "meshcheck.full_line_count";
     public static final String EXTRA_THREAD_COUNT_CONFIDENCE = "meshcheck.thread_count_confidence";
     public static final String EXTRA_THREAD_COUNT_STABLE = "meshcheck.thread_count_stable";
+    public static final String EXTRA_THREAD_COUNT_X_CM = "meshcheck.thread_count_x_cm";
+    public static final String EXTRA_THREAD_COUNT_Y_CM = "meshcheck.thread_count_y_cm";
+    public static final String EXTRA_FULL_LINE_X = "meshcheck.full_line_x";
+    public static final String EXTRA_FULL_LINE_Y = "meshcheck.full_line_y";
+    public static final String EXTRA_MARKER_MODE = "meshcheck.marker_20mm";
 
     private static final int CAMERA_PERMISSION_REQUEST = 2201;
-    private static final String PREFS = "meshcheck.camera.calibration";
-    private static final String PREF_BASE_DISTANCE_CM = "auto_base_distance_cm";
-    private static final String PREF_BASE_RULER_PX = "auto_base_ruler_px";
-    private static final String PREF_BASE_ZOOM = "auto_base_zoom";
-    private static final String PREF_BASE_FOCUS_D = "auto_base_focus_diopters";
-    private static final String PREF_MANUAL_DISTANCE_CM = "manual_distance_cm";
-    private static final String PREF_CALIBRATED = "auto_calibrated";
     private static final int SCAN_LINES = 9;
+    private static final float PHYSICAL_SIDE_CM = 2.0f;
 
     private PreviewView previewView;
     private ImageCapture imageCapture;
     private Camera camera;
     private Button captureButton;
     private Button flashButton;
-    private Button calibrationButton;
-    private Button distanceButton;
+    private TextView statusLabel;
+    private TextView resultLabel;
     private TextView zoomLabel;
-    private TextView calibrationLabel;
-    private TextView distanceLabel;
-    private TextView threadCountLabel;
-    private LinearLayout calibrationPanel;
-    private RulerOverlayView overlay;
+    private MarkerOverlay overlay;
     private ScaleGestureDetector scaleGestureDetector;
-    private SharedPreferences preferences;
     private final ExecutorService analyzerExecutor = Executors.newSingleThreadExecutor();
-    private final ThreadCountConsensus.Stabilizer stabilizer = new ThreadCountConsensus.Stabilizer(14, 7);
+    private final ThreadCountConsensus.Stabilizer stabilizerX = new ThreadCountConsensus.Stabilizer(14, 7);
+    private final ThreadCountConsensus.Stabilizer stabilizerY = new ThreadCountConsensus.Stabilizer(14, 7);
 
     private boolean torchOn;
     private boolean zoomGestureUsed;
-    private volatile boolean calibrationMode;
-    private volatile boolean calibrated;
-    private float baseDistanceCm = 10f;
-    private float pendingBaseDistanceCm = 10f;
-    private float baseRulerPx;
-    private float baseZoom = 1f;
-    private float baseFocusDiopters;
-    private float manualDistanceCm = 10f;
-    private volatile float currentDistanceCm = 10f;
     private volatile float currentZoomRatio = 1f;
-    private volatile float previousZoomRatio = 1f;
-    private volatile float latestFocusDiopters;
-    private volatile float smoothedFocusDiopters;
-    private volatile boolean autoDistanceActive;
-    private volatile int analysisFailures;
+    private volatile int markerStableFrames;
+    private float[] previousMarkerNormalized = new float[0];
 
     private final Object measurementLock = new Object();
-    private float lastThreadCountPerCm;
-    private int lastFullLineCount;
-    private float lastThreadConfidence;
-    private boolean lastThreadStable;
+    private float lastX, lastY, lastConfidence;
+    private int lastFullX, lastFullY;
+    private boolean lastStable;
+    private boolean markerDetected;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(Color.rgb(18, 59, 80));
-
-        preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
-        calibrated = preferences.getBoolean(PREF_CALIBRATED, false);
-        baseDistanceCm = preferences.getFloat(PREF_BASE_DISTANCE_CM, 10f);
-        pendingBaseDistanceCm = baseDistanceCm;
-        baseRulerPx = preferences.getFloat(PREF_BASE_RULER_PX, 0f);
-        baseZoom = preferences.getFloat(PREF_BASE_ZOOM, 1f);
-        baseFocusDiopters = preferences.getFloat(PREF_BASE_FOCUS_D, 0f);
-        manualDistanceCm = preferences.getFloat(PREF_MANUAL_DISTANCE_CM, baseDistanceCm);
-        currentDistanceCm = manualDistanceCm;
-
         buildUi();
-        if (baseRulerPx > 20f) overlay.setRulerPixels(baseRulerPx);
-        overlay.setCalibrationState(baseDistanceCm, calibrated, baseZoom);
-        updateCalibrationUi();
-        updateDistanceUi();
-        updateThreadUiWaiting();
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera();
         } else {
@@ -161,81 +115,41 @@ public class NativeCameraActivity extends ComponentActivity {
         root.addView(previewView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        overlay = new RulerOverlayView(this);
+        overlay = new MarkerOverlay(this);
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView topGuide = new TextView(this);
-        topGuide.setText("معايرة واحدة فقط • بعدها 1 cm يتغير تلقائيًا مع Zoom والمسافة");
-        topGuide.setTextColor(Color.WHITE);
-        topGuide.setTextSize(13f);
-        topGuide.setGravity(Gravity.CENTER);
-        topGuide.setPadding(dp(10), dp(8), dp(10), dp(8));
-        topGuide.setBackgroundColor(0x99000000);
-        FrameLayout.LayoutParams guideParams = new FrameLayout.LayoutParams(
+        TextView guide = new TextView(this);
+        guide.setText("ضع إطار 20×20 mm فوق المنخل • حاذِ أضلاعه مع الخيوط • لا معايرة ولا مسافة");
+        guide.setTextColor(Color.WHITE);
+        guide.setTextSize(13f);
+        guide.setGravity(Gravity.CENTER);
+        guide.setPadding(dp(8), dp(8), dp(8), dp(8));
+        guide.setBackgroundColor(0x99000000);
+        FrameLayout.LayoutParams gp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
-        guideParams.setMargins(dp(8), dp(10), dp(8), 0);
-        root.addView(topGuide, guideParams);
+        gp.setMargins(dp(8), dp(10), dp(8), 0);
+        root.addView(guide, gp);
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.VERTICAL);
-        bottom.setGravity(Gravity.CENTER);
         bottom.setPadding(dp(8), dp(5), dp(8), dp(10));
         bottom.setBackgroundColor(0xB3071318);
 
-        LinearLayout calibrationRow = new LinearLayout(this);
-        calibrationRow.setOrientation(LinearLayout.HORIZONTAL);
-        calibrationRow.setGravity(Gravity.CENTER_VERTICAL);
-        calibrationLabel = new TextView(this);
-        calibrationLabel.setTextColor(Color.WHITE);
-        calibrationLabel.setTextSize(11.5f);
-        calibrationLabel.setPadding(dp(5), 0, dp(5), 0);
-        calibrationButton = new Button(this);
-        calibrationButton.setTextSize(10f);
-        calibrationButton.setOnClickListener(v -> onCalibrationButton());
-        calibrationRow.addView(calibrationLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.9f));
-        calibrationRow.addView(calibrationButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f));
-        bottom.addView(calibrationRow, matchWrap());
+        statusLabel = new TextView(this);
+        statusLabel.setText("ابحث عن العلامات الأربع...");
+        statusLabel.setTextColor(Color.WHITE);
+        statusLabel.setTextSize(13f);
+        statusLabel.setGravity(Gravity.CENTER);
+        bottom.addView(statusLabel, matchWrap());
 
-        LinearLayout distanceRow = new LinearLayout(this);
-        distanceRow.setOrientation(LinearLayout.HORIZONTAL);
-        distanceRow.setGravity(Gravity.CENTER_VERTICAL);
-        distanceLabel = new TextView(this);
-        distanceLabel.setTextColor(Color.WHITE);
-        distanceLabel.setTextSize(12f);
-        distanceLabel.setPadding(dp(5), 0, dp(5), 0);
-        distanceButton = new Button(this);
-        distanceButton.setText("Distance");
-        distanceButton.setTextSize(10f);
-        distanceButton.setOnClickListener(v -> showCurrentDistanceDialog());
-        distanceRow.addView(distanceLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.8f));
-        distanceRow.addView(distanceButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
-        bottom.addView(distanceRow, matchWrap());
-
-        threadCountLabel = new TextView(this);
-        threadCountLabel.setTextColor(Color.WHITE);
-        threadCountLabel.setTextSize(13f);
-        threadCountLabel.setGravity(Gravity.CENTER);
-        threadCountLabel.setPadding(dp(5), dp(3), dp(5), dp(3));
-        bottom.addView(threadCountLabel, matchWrap());
-
-        calibrationPanel = new LinearLayout(this);
-        calibrationPanel.setOrientation(LinearLayout.VERTICAL);
-        calibrationPanel.setGravity(Gravity.CENTER);
-        calibrationPanel.setVisibility(View.GONE);
-        LinearLayout fineRow = new LinearLayout(this);
-        fineRow.setOrientation(LinearLayout.HORIZONTAL);
-        fineRow.addView(makeAdjustButton("−1%", 0.99f), weighted());
-        fineRow.addView(makeAdjustButton("−0.1%", 0.999f), weighted());
-        fineRow.addView(makeAdjustButton("+0.1%", 1.001f), weighted());
-        fineRow.addView(makeAdjustButton("+1%", 1.01f), weighted());
-        calibrationPanel.addView(fineRow, matchWrap());
-        Button save = new Button(this);
-        save.setText("حفظ معايرة الأساس");
-        save.setTextSize(11f);
-        save.setOnClickListener(v -> saveCalibration());
-        calibrationPanel.addView(save, matchWrap());
-        bottom.addView(calibrationPanel, matchWrap());
+        resultLabel = new TextView(this);
+        resultLabel.setText("X: --  •  Y: --");
+        resultLabel.setTextColor(Color.WHITE);
+        resultLabel.setTextSize(14f);
+        resultLabel.setGravity(Gravity.CENTER);
+        resultLabel.setPadding(0, dp(3), 0, dp(3));
+        bottom.addView(resultLabel, matchWrap());
 
         LinearLayout zoomRow = new LinearLayout(this);
         zoomRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -249,12 +163,11 @@ public class NativeCameraActivity extends ComponentActivity {
         zoomLabel.setTextColor(Color.WHITE);
         zoomLabel.setTextSize(11f);
         zoomLabel.setGravity(Gravity.CENTER);
-        zoomRow.addView(zoomLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.25f));
+        zoomRow.addView(zoomLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.2f));
         bottom.addView(zoomRow, matchWrap());
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setGravity(Gravity.CENTER);
         captureButton = new Button(this);
         captureButton.setText("التقاط وتحليل");
         captureButton.setEnabled(false);
@@ -287,19 +200,11 @@ public class NativeCameraActivity extends ComponentActivity {
         return p;
     }
 
-    private Button makeAdjustButton(String text, float factor) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(9f);
-        b.setOnClickListener(v -> { if (calibrationMode) overlay.adjustRuler(factor); });
-        return b;
-    }
-
     private Button makeZoomButton(String text, float ratio) {
         Button b = new Button(this);
         b.setText(text);
         b.setTextSize(10f);
-        b.setOnClickListener(v -> requestZoom(ratio));
+        b.setOnClickListener(v -> setZoomInternal(ratio));
         return b;
     }
 
@@ -307,10 +212,10 @@ public class NativeCameraActivity extends ComponentActivity {
         scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScaleBegin(@NonNull ScaleGestureDetector detector) {
                 zoomGestureUsed = true;
-                return !calibrationMode;
+                return true;
             }
             @Override public boolean onScale(@NonNull ScaleGestureDetector detector) {
-                if (camera == null || calibrationMode) return false;
+                if (camera == null) return false;
                 ZoomState state = camera.getCameraInfo().getZoomState().getValue();
                 if (state == null) return false;
                 setZoomInternal(state.getZoomRatio() * detector.getScaleFactor());
@@ -326,14 +231,6 @@ public class NativeCameraActivity extends ComponentActivity {
             }
             return true;
         });
-    }
-
-    private void requestZoom(float ratio) {
-        if (calibrationMode) {
-            Toast.makeText(this, "أكمل المعايرة قبل تغيير Zoom.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        setZoomInternal(ratio);
     }
 
     private void setZoomInternal(float requested) {
@@ -353,342 +250,230 @@ public class NativeCameraActivity extends ComponentActivity {
                 imageCapture = new ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                         .setTargetResolution(new Size(2560, 1440)).build();
-
-                ImageAnalysis.Builder analysisBuilder = new ImageAnalysis.Builder()
+                ImageAnalysis analysis = new ImageAnalysis.Builder()
                         .setTargetResolution(new Size(1280, 720))
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST);
-                new Camera2Interop.Extender<>(analysisBuilder).setSessionCaptureCallback(
-                        new CameraCaptureSession.CaptureCallback() {
-                            @Override
-                            public void onCaptureCompleted(@NonNull CameraCaptureSession session,
-                                                           @NonNull android.hardware.camera2.CaptureRequest request,
-                                                           @NonNull TotalCaptureResult result) {
-                                Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
-                                if (focus != null && focus > 0.02f) {
-                                    latestFocusDiopters = focus;
-                                    if (!(smoothedFocusDiopters > 0.02f)) smoothedFocusDiopters = focus;
-                                    else smoothedFocusDiopters = smoothedFocusDiopters * 0.86f + focus * 0.14f;
-                                    updateAutoDistanceAndRuler();
-                                }
-                            }
-                        });
-                ImageAnalysis analysis = analysisBuilder.build();
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build();
                 analysis.setAnalyzer(analyzerExecutor, this::analyzeFrame);
-
                 provider.unbindAll();
                 camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA,
                         preview, imageCapture, analysis);
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
-                captureButton.setEnabled(true);
                 flashButton.setEnabled(camera.getCameraInfo().hasFlashUnit());
-
                 camera.getCameraInfo().getZoomState().observe(this, state -> {
                     if (state == null) return;
-                    currentZoomRatio = state.getZoomRatio();
-                    zoomLabel.setText(String.format(Locale.US, "%.2f×\nmax %.1f", currentZoomRatio, state.getMaxZoomRatio()));
-                    if (Math.abs(currentZoomRatio - previousZoomRatio) > 0.02f) {
-                        previousZoomRatio = currentZoomRatio;
-                        if (!calibrationMode) updateAutoDistanceAndRuler();
-                        resetMeasurement();
-                    }
+                    float newZoom = state.getZoomRatio();
+                    if (Math.abs(newZoom - currentZoomRatio) > 0.02f) resetMeasurement();
+                    currentZoomRatio = newZoom;
+                    zoomLabel.setText(String.format(Locale.US, "%.2f×", currentZoomRatio));
                 });
             } catch (ExecutionException e) {
                 Toast.makeText(this, "تعذر تشغيل الكاميرا: " + e.getMessage(), Toast.LENGTH_LONG).show();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                Toast.makeText(this, "تعذر تشغيل الكاميرا الخلفية: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "تعذر تشغيل الكاميرا: " + e.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private void updateAutoDistanceAndRuler() {
-        if (!calibrated || calibrationMode) return;
-        float estimated = AutoRulerModel.distanceFromFocus(baseDistanceCm, baseFocusDiopters, smoothedFocusDiopters);
-        if (estimated > 0f) {
-            currentDistanceCm = estimated;
-            autoDistanceActive = true;
-        } else {
-            currentDistanceCm = manualDistanceCm;
-            autoDistanceActive = false;
-        }
-        float px = AutoRulerModel.rulerPixels(baseRulerPx, baseZoom, baseDistanceCm,
-                currentZoomRatio, currentDistanceCm);
-        if (px > 0f) overlay.setRulerPixels(px);
-        overlay.setLiveAutoState(currentDistanceCm, currentZoomRatio, autoDistanceActive);
-        runOnUiThread(this::updateDistanceUi);
-    }
-
-    private void showCurrentDistanceDialog() {
-        EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        input.setText(String.format(Locale.US, "%.1f", manualDistanceCm));
-        input.setSelectAllOnFocus(true);
-        new AlertDialog.Builder(this)
-                .setTitle("المسافة الحالية")
-                .setMessage("هذه القيمة تُستخدم تلقائيًا إذا لم يوفر الهاتف Focus Distance موثوقًا. أدخل المسافة من العدسة إلى مستوى المنخل بالسنتيمتر.")
-                .setView(input)
-                .setNegativeButton("إلغاء", null)
-                .setPositiveButton("اعتماد", (d, w) -> {
-                    try {
-                        manualDistanceCm = AutoRulerModel.clampDistance(Float.parseFloat(input.getText().toString().trim()));
-                        preferences.edit().putFloat(PREF_MANUAL_DISTANCE_CM, manualDistanceCm).apply();
-                        updateAutoDistanceAndRuler();
-                        resetMeasurement();
-                    } catch (Exception e) {
-                        Toast.makeText(this, "أدخل مسافة صحيحة.", Toast.LENGTH_LONG).show();
-                    }
-                }).show();
-    }
-
-    private void onCalibrationButton() {
-        if (calibrated) {
-            new AlertDialog.Builder(this)
-                    .setTitle("إعادة معايرة الأساس")
-                    .setMessage(String.format(Locale.US,
-                            "المعايرة الأساسية الحالية: %.2f× عند %.1f cm. لا تحتاج إعادة المعايرة عند تغيير Zoom أو المسافة.",
-                            baseZoom, baseDistanceCm))
-                    .setNegativeButton("إلغاء", null)
-                    .setPositiveButton("Reset", (d, w) -> resetCalibration()).show();
-        } else showBaseCalibrationDialog();
-    }
-
-    private void showBaseCalibrationDialog() {
-        EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        input.setText(String.format(Locale.US, "%.1f", manualDistanceCm));
-        input.setSelectAllOnFocus(true);
-        new AlertDialog.Builder(this)
-                .setTitle(String.format(Locale.US, "Base calibration at %.2f×", currentZoomRatio))
-                .setMessage("ضع مرجعًا حقيقيًا 1 cm في نفس مستوى المنخل، وقِس المسافة من العدسة إلى المنخل. هذه المعايرة ستُستخدم بعد ذلك لكل Zoom ومسافة.")
-                .setView(input)
-                .setNegativeButton("إلغاء", null)
-                .setPositiveButton("ابدأ", (d, w) -> {
-                    try {
-                        float cm = Float.parseFloat(input.getText().toString().trim());
-                        if (cm < 2f || cm > 100f) throw new NumberFormatException();
-                        beginCalibration(cm);
-                    } catch (Exception e) {
-                        Toast.makeText(this, "أدخل مسافة صحيحة 2–100 cm.", Toast.LENGTH_LONG).show();
-                    }
-                }).show();
-    }
-
-    private void beginCalibration(float distanceCm) {
-        pendingBaseDistanceCm = distanceCm;
-        calibrationMode = true;
-        resetMeasurement();
-        overlay.resetRulerToDisplayCm();
-        overlay.setCalibrationMode(true);
-        overlay.setCalibrationState(distanceCm, false, currentZoomRatio);
-        calibrationPanel.setVisibility(View.VISIBLE);
-        calibrationLabel.setText(String.format(Locale.US,
-                "BASE: %.2f× • %.1f cm • طابق الخط مع 1 cm الحقيقي",
-                currentZoomRatio, distanceCm));
-        calibrationButton.setText("إلغاء");
-        calibrationButton.setOnClickListener(v -> cancelCalibration());
-    }
-
-    private void cancelCalibration() {
-        calibrationMode = false;
-        calibrationPanel.setVisibility(View.GONE);
-        overlay.setCalibrationMode(false);
-        calibrationButton.setOnClickListener(v -> onCalibrationButton());
-        if (calibrated) updateAutoDistanceAndRuler();
-        updateCalibrationUi();
-        resetMeasurement();
-    }
-
-    private void saveCalibration() {
-        if (!calibrationMode) return;
-        baseDistanceCm = pendingBaseDistanceCm;
-        baseRulerPx = overlay.getRulerPixels();
-        baseZoom = currentZoomRatio;
-        baseFocusDiopters = smoothedFocusDiopters > 0.02f ? smoothedFocusDiopters : latestFocusDiopters;
-        manualDistanceCm = baseDistanceCm;
-        calibrated = true;
-        calibrationMode = false;
-        preferences.edit()
-                .putBoolean(PREF_CALIBRATED, true)
-                .putFloat(PREF_BASE_DISTANCE_CM, baseDistanceCm)
-                .putFloat(PREF_BASE_RULER_PX, baseRulerPx)
-                .putFloat(PREF_BASE_ZOOM, baseZoom)
-                .putFloat(PREF_BASE_FOCUS_D, baseFocusDiopters)
-                .putFloat(PREF_MANUAL_DISTANCE_CM, manualDistanceCm)
-                .apply();
-        calibrationPanel.setVisibility(View.GONE);
-        overlay.setCalibrationMode(false);
-        overlay.setCalibrationState(baseDistanceCm, true, baseZoom);
-        calibrationButton.setOnClickListener(v -> onCalibrationButton());
-        updateCalibrationUi();
-        updateAutoDistanceAndRuler();
-        resetMeasurement();
-        Toast.makeText(this, "تم حفظ Base Calibration. الآن 1 cm يتغير تلقائيًا مع Zoom والمسافة.", Toast.LENGTH_LONG).show();
-    }
-
-    private void resetCalibration() {
-        calibrated = false;
-        calibrationMode = false;
-        preferences.edit().clear().apply();
-        baseDistanceCm = 10f;
-        baseRulerPx = 0f;
-        baseZoom = 1f;
-        baseFocusDiopters = 0f;
-        manualDistanceCm = 10f;
-        currentDistanceCm = 10f;
-        autoDistanceActive = false;
-        overlay.resetRulerToDisplayCm();
-        overlay.setCalibrationMode(false);
-        overlay.setCalibrationState(10f, false, 1f);
-        calibrationPanel.setVisibility(View.GONE);
-        calibrationButton.setOnClickListener(v -> onCalibrationButton());
-        updateCalibrationUi();
-        updateDistanceUi();
-        resetMeasurement();
-    }
-
-    private void updateCalibrationUi() {
-        if (calibrated) {
-            calibrationLabel.setText(String.format(Locale.US,
-                    "✓ BASE SAVED • %.2f× @ %.1f cm", baseZoom, baseDistanceCm));
-            calibrationButton.setText("Reset");
-        } else {
-            calibrationLabel.setText("معايرة واحدة: اختر Zoom + ضع 1 cm حقيقي");
-            calibrationButton.setText("معايرة");
-        }
-    }
-
-    private void updateDistanceUi() {
-        if (!calibrated) {
-            distanceLabel.setText(String.format(Locale.US, "Distance %.1f cm (قبل المعايرة)", manualDistanceCm));
-            return;
-        }
-        distanceLabel.setText(String.format(Locale.US, "Distance %.1f cm (%s)",
-                currentDistanceCm, autoDistanceActive ? "AUTO" : "MANUAL"));
-    }
-
     private void analyzeFrame(@NonNull ImageProxy image) {
         try {
-            if (!calibrated || calibrationMode) {
-                postWaiting(calibrationMode ? "المعايرة جارية..." : "اعمل Base Calibration مرة واحدة.");
+            DetectorFrame detectorFrame = makeDetectorFrame(image);
+            Marker20mmDetector.Result marker = Marker20mmDetector.detect(
+                    detectorFrame.gray, detectorFrame.width, detectorFrame.height);
+            if (!marker.ok) {
+                markerDetected = false;
+                markerStableFrames = 0;
+                previousMarkerNormalized = new float[0];
+                stabilizerX.reset(); stabilizerY.reset();
+                runOnUiThread(() -> {
+                    statusLabel.setText("20×20 marker: " + marker.reason);
+                    resultLabel.setText("X: --  •  Y: --");
+                    captureButton.setEnabled(false);
+                    overlay.clearMarker(marker.reason);
+                });
                 return;
             }
-            RulerGeometry geometry = overlay.snapshotGeometry();
-            if (!geometry.valid || !geometry.fits) {
-                postFailure("1 cm خارج مجال الصورة — قلل Zoom أو زِد المسافة.");
+
+            Marker20mmDetector.Point[] sourceCorners = scaleMarker(marker.corners, detectorFrame.step);
+            boolean markerStable = updateMarkerStability(sourceCorners, image.getWidth(), image.getHeight());
+            float[] viewCorners = sourceCornersToView(sourceCorners, image);
+            runOnUiThread(() -> overlay.setMarker(viewCorners, marker.confidence, markerStable));
+
+            if (!markerStable) {
+                stabilizerX.reset(); stabilizerY.reset();
+                runOnUiThread(() -> {
+                    statusLabel.setText("HOLD — ثبّت الهاتف حتى يثبت مربع 20×20");
+                    resultLabel.setText("X: --  •  Y: --");
+                    captureButton.setEnabled(false);
+                });
                 return;
             }
-            ThreadProfileCounter.Result[] scans = buildAndAnalyzeScanLines(image, geometry);
-            if (scans == null) { postFailure("تعذر قراءة نافذة 1 cm."); return; }
-            ThreadCountConsensus.FrameResult frame = ThreadCountConsensus.fuse(scans);
-            if (!frame.ok) { postFailure(frame.reason); return; }
-            acceptFrame(frame);
+
+            DirectionMeasurement x = measureDirection(image, sourceCorners, true);
+            DirectionMeasurement y = measureDirection(image, sourceCorners, false);
+            if (!x.ok && !y.ok) {
+                runOnUiThread(() -> {
+                    statusLabel.setText("Marker ثابت، لكن الخيوط غير واضحة — اضغط على القماش للتركيز");
+                    captureButton.setEnabled(false);
+                });
+                return;
+            }
+
+            ThreadCountConsensus.Snapshot sx = x.ok ? stabilizerX.push(x.frame) : stabilizerX.current();
+            ThreadCountConsensus.Snapshot sy = y.ok ? stabilizerY.push(y.frame) : stabilizerY.current();
+            acceptMeasurements(x, y, sx, sy, marker.confidence);
         } catch (Exception e) {
-            postFailure("تعذر عد الخيوط: " + e.getMessage());
-        } finally { image.close(); }
-    }
-
-    private ThreadProfileCounter.Result[] buildAndAnalyzeScanLines(ImageProxy image, RulerGeometry g) {
-        int sourceWidth = image.getWidth(), sourceHeight = image.getHeight();
-        int rotation = ((image.getImageInfo().getRotationDegrees() % 360) + 360) % 360;
-        int rotatedWidth = (rotation == 90 || rotation == 270) ? sourceHeight : sourceWidth;
-        int rotatedHeight = (rotation == 90 || rotation == 270) ? sourceWidth : sourceHeight;
-        float scale = Math.min(g.viewWidth / (float) rotatedWidth, g.viewHeight / (float) rotatedHeight);
-        if (!(scale > 0f)) return null;
-        float offsetX = (g.viewWidth - rotatedWidth * scale) / 2f;
-        float offsetY = (g.viewHeight - rotatedHeight * scale) / 2f;
-        float rotatedLeft = (g.left - offsetX) / scale;
-        float rotatedRight = (g.right - offsetX) / scale;
-        float rotatedCenterY = (g.y - offsetY) / scale;
-        if (rotatedLeft < 0 || rotatedRight >= rotatedWidth || rotatedCenterY < 0 || rotatedCenterY >= rotatedHeight) return null;
-        int samples = Math.max(1, Math.round(rotatedRight - rotatedLeft) + 1);
-        if (samples < 60) return null;
-
-        ImageProxy.PlaneProxy yPlane = image.getPlanes()[0];
-        ByteBuffer buffer = yPlane.getBuffer();
-        int rowStride = yPlane.getRowStride(), pixelStride = yPlane.getPixelStride();
-        float scanSpacing = Math.max(2f, Math.min(6f, samples / 160f));
-        ThreadProfileCounter.Result[] results = new ThreadProfileCounter.Result[SCAN_LINES];
-        int middle = SCAN_LINES / 2;
-        for (int scan = 0; scan < SCAN_LINES; scan++) {
-            float ry = rotatedCenterY + (scan - middle) * scanSpacing;
-            float[] profile = new float[samples];
-            for (int i = 0; i < samples; i++) {
-                float rx = rotatedLeft + (rotatedRight - rotatedLeft) * i / Math.max(1f, samples - 1f);
-                float sum = 0f; int count = 0;
-                for (int local = -1; local <= 1; local++) {
-                    int[] source = rotatedToSource(rx, ry + local, sourceWidth, sourceHeight, rotation);
-                    int index = source[1] * rowStride + source[0] * pixelStride;
-                    if (index >= 0 && index < buffer.limit()) { sum += buffer.get(index) & 0xFF; count++; }
-                }
-                profile[i] = count > 0 ? sum / count : 0f;
-            }
-            results[scan] = ThreadProfileCounter.analyze(profile);
+            runOnUiThread(() -> statusLabel.setText("تعذر تحليل marker: " + e.getMessage()));
+        } finally {
+            image.close();
         }
-        return results;
     }
 
-    private static int[] rotatedToSource(float rx, float ry, int width, int height, int rotation) {
-        int sx, sy;
-        switch (rotation) {
-            case 90: sx = Math.round(ry); sy = height - 1 - Math.round(rx); break;
-            case 180: sx = width - 1 - Math.round(rx); sy = height - 1 - Math.round(ry); break;
-            case 270: sx = width - 1 - Math.round(ry); sy = Math.round(rx); break;
-            default: sx = Math.round(rx); sy = Math.round(ry); break;
-        }
-        sx = Math.max(0, Math.min(width - 1, sx));
-        sy = Math.max(0, Math.min(height - 1, sy));
-        return new int[]{sx, sy};
-    }
+    private void acceptMeasurements(DirectionMeasurement x, DirectionMeasurement y,
+                                    ThreadCountConsensus.Snapshot sx,
+                                    ThreadCountConsensus.Snapshot sy,
+                                    float markerConfidence) {
+        float vx = sx.threadsPerCm > 0f ? sx.threadsPerCm : (x.ok ? x.frame.threadsPerCm : 0f);
+        float vy = sy.threadsPerCm > 0f ? sy.threadsPerCm : (y.ok ? y.frame.threadsPerCm : 0f);
+        boolean stableX = !x.ok || sx.stable;
+        boolean stableY = !y.ok || sy.stable;
+        boolean stable = (vx > 0f || vy > 0f) && stableX && stableY;
+        float confidence = Math.min(markerConfidence,
+                Math.max(sx.confidence, sy.confidence));
+        int fullX = x.ok ? x.frame.currentFullLineCount : 0;
+        int fullY = y.ok ? y.frame.currentFullLineCount : 0;
 
-    private void acceptFrame(ThreadCountConsensus.FrameResult frame) {
-        analysisFailures = 0;
-        ThreadCountConsensus.Snapshot snapshot = stabilizer.push(frame);
         synchronized (measurementLock) {
-            lastFullLineCount = frame.currentFullLineCount;
-            lastThreadCountPerCm = snapshot.threadsPerCm > 0f ? snapshot.threadsPerCm : frame.threadsPerCm;
-            lastThreadConfidence = snapshot.confidence > 0f ? snapshot.confidence : frame.confidence;
-            lastThreadStable = snapshot.stable;
+            lastX = vx; lastY = vy; lastFullX = fullX; lastFullY = fullY;
+            lastStable = stable; lastConfidence = confidence; markerDetected = true;
         }
+
         runOnUiThread(() -> {
-            String state = snapshot.stable ? "✓ ثابت" : "تثبيت " + snapshot.samples + "/7";
-            threadCountLabel.setText(String.format(Locale.US,
-                    "%d خطوط كاملة • %.1f n/cm • %s • %d/%d",
-                    frame.currentFullLineCount, lastThreadCountPerCm, state,
-                    frame.validScans, frame.totalScans));
-            overlay.setThreadMeasurement(frame.currentFullLineCount, lastThreadCountPerCm,
-                    lastThreadConfidence, snapshot.stable, frame.centersNormalized, "");
+            statusLabel.setText(stable ? "✓ MARKER 20×20 DETECTED • القياس ثابت"
+                    : "MARKER 20×20 DETECTED • جارٍ تثبيت القراءة...");
+            resultLabel.setText(String.format(Locale.US,
+                    "X %.1f n/cm (%d/20mm)  •  Y %.1f n/cm (%d/20mm)",
+                    vx, fullX, vy, fullY));
+            overlay.setResults(vx, vy, stable);
+            captureButton.setEnabled(stable);
         });
     }
 
-    private void postFailure(String reason) {
-        analysisFailures++;
-        if (analysisFailures >= 5) resetMeasurement();
-        runOnUiThread(() -> {
-            threadCountLabel.setText(reason);
-            overlay.setThreadMeasurement(0, 0f, 0f, false, new float[0], reason);
-        });
+    private DirectionMeasurement measureDirection(ImageProxy image,
+                                                  Marker20mmDetector.Point[] q,
+                                                  boolean horizontal) {
+        Homography h = Homography.fromQuad(q[0], q[1], q[2], q[3]);
+        if (h == null) return DirectionMeasurement.fail();
+        int sideSamples = estimateSamples(q, horizontal);
+        ThreadProfileCounter.Result[] scans = new ThreadProfileCounter.Result[SCAN_LINES];
+        for (int s = 0; s < SCAN_LINES; s++) {
+            float fixed = (s + 1f) / (SCAN_LINES + 1f);
+            float[] profile = new float[sideSamples];
+            for (int i = 0; i < sideSamples; i++) {
+                float t = i / (float) Math.max(1, sideSamples - 1);
+                float u = horizontal ? t : fixed;
+                float v = horizontal ? fixed : t;
+                Marker20mmDetector.Point p = h.map(u, v);
+                profile[i] = sampleLuma(image, p.x, p.y);
+            }
+            scans[s] = ThreadProfileCounter.analyze(profile, PHYSICAL_SIDE_CM);
+        }
+        ThreadCountConsensus.FrameResult frame = ThreadCountConsensus.fuse(scans, PHYSICAL_SIDE_CM);
+        return frame.ok ? new DirectionMeasurement(true, frame) : DirectionMeasurement.fail();
     }
 
-    private void postWaiting(String reason) {
-        runOnUiThread(() -> {
-            threadCountLabel.setText(reason);
-            overlay.setThreadMeasurement(0, 0f, 0f, false, new float[0], reason);
-        });
+    private int estimateSamples(Marker20mmDetector.Point[] q, boolean horizontal) {
+        float a = horizontal ? distance(q[0], q[1]) : distance(q[0], q[3]);
+        float b = horizontal ? distance(q[3], q[2]) : distance(q[1], q[2]);
+        return Math.max(180, Math.min(1200, Math.round((a + b) / 2f)));
     }
 
-    private void updateThreadUiWaiting() {
-        threadCountLabel.setText(calibrated ? "جارٍ تحليل 9 مسارات داخل Auto 1 cm..." : "اعمل Base Calibration مرة واحدة.");
+    private float sampleLuma(ImageProxy image, float x, float y) {
+        int ix = Math.max(0, Math.min(image.getWidth() - 1, Math.round(x)));
+        int iy = Math.max(0, Math.min(image.getHeight() - 1, Math.round(y)));
+        ImageProxy.PlaneProxy plane = image.getPlanes()[0];
+        int index = iy * plane.getRowStride() + ix * plane.getPixelStride();
+        ByteBuffer buffer = plane.getBuffer();
+        return index >= 0 && index < buffer.limit() ? (buffer.get(index) & 0xFF) : 0f;
+    }
+
+    private DetectorFrame makeDetectorFrame(ImageProxy image) {
+        int step = Math.max(1, (int) Math.ceil(image.getWidth() / 520.0));
+        int w = image.getWidth() / step;
+        int h = image.getHeight() / step;
+        byte[] gray = new byte[w * h];
+        ImageProxy.PlaneProxy plane = image.getPlanes()[0];
+        ByteBuffer buffer = plane.getBuffer();
+        int rowStride = plane.getRowStride(), pixelStride = plane.getPixelStride();
+        for (int y = 0; y < h; y++) {
+            int sy = y * step;
+            for (int x = 0; x < w; x++) {
+                int sx = x * step;
+                int index = sy * rowStride + sx * pixelStride;
+                gray[y * w + x] = index < buffer.limit() ? buffer.get(index) : 0;
+            }
+        }
+        return new DetectorFrame(gray, w, h, step);
+    }
+
+    private Marker20mmDetector.Point[] scaleMarker(Marker20mmDetector.Point[] p, int step) {
+        Marker20mmDetector.Point[] out = new Marker20mmDetector.Point[4];
+        for (int i = 0; i < 4; i++) out[i] = new Marker20mmDetector.Point(p[i].x * step, p[i].y * step);
+        return out;
+    }
+
+    private boolean updateMarkerStability(Marker20mmDetector.Point[] q, int width, int height) {
+        float[] now = new float[8];
+        for (int i = 0; i < 4; i++) {
+            now[i * 2] = q[i].x / width;
+            now[i * 2 + 1] = q[i].y / height;
+        }
+        if (previousMarkerNormalized.length == 8) {
+            float sum = 0f;
+            for (int i = 0; i < 8; i++) sum += Math.abs(now[i] - previousMarkerNormalized[i]);
+            float motion = sum / 8f;
+            markerStableFrames = motion < 0.008f ? markerStableFrames + 1 : 0;
+        } else markerStableFrames = 0;
+        previousMarkerNormalized = now;
+        return markerStableFrames >= 2;
+    }
+
+    private float[] sourceCornersToView(Marker20mmDetector.Point[] q, ImageProxy image) {
+        int sw = image.getWidth(), sh = image.getHeight();
+        int rotation = ((image.getImageInfo().getRotationDegrees() % 360) + 360) % 360;
+        int rw = (rotation == 90 || rotation == 270) ? sh : sw;
+        int rh = (rotation == 90 || rotation == 270) ? sw : sh;
+        float scale = Math.min(previewView.getWidth() / (float) rw, previewView.getHeight() / (float) rh);
+        float ox = (previewView.getWidth() - rw * scale) / 2f;
+        float oy = (previewView.getHeight() - rh * scale) / 2f;
+        float[] out = new float[8];
+        for (int i = 0; i < 4; i++) {
+            float rx, ry;
+            float sx = q[i].x, sy = q[i].y;
+            switch (rotation) {
+                case 90: rx = sh - 1 - sy; ry = sx; break;
+                case 180: rx = sw - 1 - sx; ry = sh - 1 - sy; break;
+                case 270: rx = sy; ry = sw - 1 - sx; break;
+                default: rx = sx; ry = sy; break;
+            }
+            out[i * 2] = ox + rx * scale;
+            out[i * 2 + 1] = oy + ry * scale;
+        }
+        return out;
     }
 
     private void resetMeasurement() {
-        stabilizer.reset();
+        stabilizerX.reset(); stabilizerY.reset();
+        markerStableFrames = 0; previousMarkerNormalized = new float[0];
         synchronized (measurementLock) {
-            lastThreadCountPerCm = 0f; lastFullLineCount = 0; lastThreadConfidence = 0f; lastThreadStable = false;
+            lastX = lastY = lastConfidence = 0f; lastFullX = lastFullY = 0;
+            lastStable = false; markerDetected = false;
         }
         runOnUiThread(() -> {
-            overlay.setThreadMeasurement(0, 0f, 0f, false, new float[0], "");
-            updateThreadUiWaiting();
+            captureButton.setEnabled(false);
+            resultLabel.setText("X: --  •  Y: --");
+            overlay.setResults(0f, 0f, false);
         });
     }
 
@@ -700,7 +485,7 @@ public class NativeCameraActivity extends ComponentActivity {
                     FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
                     .setAutoCancelDuration(4, TimeUnit.SECONDS).build();
             camera.getCameraControl().startFocusAndMetering(action);
-            overlay.showFocusMarker(x, y);
+            overlay.showFocus(x, y);
         } catch (Exception ignored) {}
     }
 
@@ -712,26 +497,35 @@ public class NativeCameraActivity extends ComponentActivity {
     }
 
     private void capturePhoto() {
-        if (imageCapture == null || !calibrated) {
-            Toast.makeText(this, "اعمل Base Calibration أولًا.", Toast.LENGTH_LONG).show();
-            return;
+        if (imageCapture == null) return;
+        synchronized (measurementLock) {
+            if (!markerDetected || !lastStable) {
+                Toast.makeText(this, "انتظر حتى تثبت قراءة Marker 20×20.", Toast.LENGTH_LONG).show();
+                return;
+            }
         }
         captureButton.setEnabled(false);
-        File output = new File(getCacheDir(), "meshcheck-native-" + System.currentTimeMillis() + ".jpg");
+        File output = new File(getCacheDir(), "meshcheck-marker20-" + System.currentTimeMillis() + ".jpg");
         ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(output).build();
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
             @Override public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                 Intent result = new Intent();
                 result.putExtra(EXTRA_CAPTURE_PATH, output.getAbsolutePath());
                 result.putExtra(EXTRA_ZOOM_RATIO, currentZoomRatio);
-                result.putExtra(EXTRA_FIXED_DISTANCE_CM, currentDistanceCm);
+                result.putExtra(EXTRA_FIXED_DISTANCE_CM, 0f);
                 result.putExtra(EXTRA_FIXED_CALIBRATED, true);
-                result.putExtra(EXTRA_RULER_BASE_PX_1X, overlay.getRulerPixels());
+                result.putExtra(EXTRA_RULER_BASE_PX_1X, 0f);
+                result.putExtra(EXTRA_MARKER_MODE, true);
                 synchronized (measurementLock) {
-                    result.putExtra(EXTRA_THREAD_COUNT_CM, lastThreadCountPerCm);
-                    result.putExtra(EXTRA_FULL_LINE_COUNT, lastFullLineCount);
-                    result.putExtra(EXTRA_THREAD_COUNT_CONFIDENCE, lastThreadConfidence);
-                    result.putExtra(EXTRA_THREAD_COUNT_STABLE, lastThreadStable);
+                    float primary = lastX > 0f && lastY > 0f ? (lastX + lastY) / 2f : Math.max(lastX, lastY);
+                    result.putExtra(EXTRA_THREAD_COUNT_CM, primary);
+                    result.putExtra(EXTRA_FULL_LINE_COUNT, Math.max(lastFullX, lastFullY));
+                    result.putExtra(EXTRA_THREAD_COUNT_X_CM, lastX);
+                    result.putExtra(EXTRA_THREAD_COUNT_Y_CM, lastY);
+                    result.putExtra(EXTRA_FULL_LINE_X, lastFullX);
+                    result.putExtra(EXTRA_FULL_LINE_Y, lastFullY);
+                    result.putExtra(EXTRA_THREAD_COUNT_CONFIDENCE, lastConfidence);
+                    result.putExtra(EXTRA_THREAD_COUNT_STABLE, lastStable);
                 }
                 setResult(RESULT_OK, result); finish();
             }
@@ -755,93 +549,91 @@ public class NativeCameraActivity extends ComponentActivity {
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private static float distance(Marker20mmDetector.Point a, Marker20mmDetector.Point b) {
+        float dx = a.x - b.x, dy = a.y - b.y;
+        return (float) Math.sqrt(dx * dx + dy * dy);
+    }
 
-    private static final class RulerGeometry {
-        final float left, right, y; final int viewWidth, viewHeight; final boolean fits, valid;
-        RulerGeometry(float left, float right, float y, int viewWidth, int viewHeight, boolean fits) {
-            this.left = left; this.right = right; this.y = y; this.viewWidth = viewWidth; this.viewHeight = viewHeight;
-            this.fits = fits; this.valid = viewWidth > 0 && viewHeight > 0 && right > left;
+    private static final class DetectorFrame {
+        final byte[] gray; final int width, height, step;
+        DetectorFrame(byte[] gray, int width, int height, int step) {
+            this.gray = gray; this.width = width; this.height = height; this.step = step;
         }
     }
 
-    private static final class RulerOverlayView extends View {
-        private final Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint panelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint focusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint markerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint stablePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint scanPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float density, displayOneCmPixels;
-        private volatile float rulerPixels, fixedDistanceCm = 10f, calibratedZoom = 1f;
-        private volatile float liveDistanceCm = 10f, liveZoom = 1f;
-        private volatile boolean calibrated, calibrationMode, autoDistance;
-        private volatile int measuredFullLines, viewWidth, viewHeight;
-        private volatile float measuredThreadsPerCm, measuredConfidence;
-        private volatile boolean measuredStable;
-        private volatile float[] measuredCenters = new float[0];
-        private volatile String measurementStatus = "";
-        private float focusX = -1f, focusY = -1f; private long focusTime;
+    private static final class DirectionMeasurement {
+        final boolean ok; final ThreadCountConsensus.FrameResult frame;
+        DirectionMeasurement(boolean ok, ThreadCountConsensus.FrameResult frame) { this.ok = ok; this.frame = frame; }
+        static DirectionMeasurement fail() { return new DirectionMeasurement(false, null); }
+    }
 
-        RulerOverlayView(NativeCameraActivity context) {
-            super(context); setWillNotDraw(false);
-            DisplayMetrics m = getResources().getDisplayMetrics(); density = m.density;
-            float xdpi = (m.xdpi >= 100f && m.xdpi <= 1000f) ? m.xdpi : m.densityDpi;
-            displayOneCmPixels = xdpi / 2.54f; rulerPixels = displayOneCmPixels;
-            shadowPaint.setColor(0xDD000000); shadowPaint.setStrokeWidth(5f * density);
-            linePaint.setColor(Color.WHITE); linePaint.setStrokeWidth(2f * density);
-            textPaint.setColor(Color.WHITE); textPaint.setTextSize(11f * density); textPaint.setFakeBoldText(true);
-            panelPaint.setColor(0x76000000);
-            focusPaint.setColor(0xFF67E8D1); focusPaint.setStyle(Paint.Style.STROKE); focusPaint.setStrokeWidth(2f * density);
-            markerPaint.setColor(0xFFFFD54F); markerPaint.setStrokeWidth(2.5f * density);
-            stablePaint.setColor(0xFF67E8D1); stablePaint.setStrokeWidth(3f * density);
-            scanPaint.setColor(0x5573D7FF); scanPaint.setStrokeWidth(1f * density);
+    /** Homography from unit square to detected 20x20 marker quadrilateral. */
+    private static final class Homography {
+        final double a11,a12,a13,a21,a22,a23,a31,a32;
+        Homography(double a11,double a12,double a13,double a21,double a22,double a23,double a31,double a32) {
+            this.a11=a11;this.a12=a12;this.a13=a13;this.a21=a21;this.a22=a22;this.a23=a23;this.a31=a31;this.a32=a32;
         }
+        static Homography fromQuad(Marker20mmDetector.Point tl, Marker20mmDetector.Point tr,
+                                   Marker20mmDetector.Point br, Marker20mmDetector.Point bl) {
+            double x0=tl.x,y0=tl.y,x1=tr.x,y1=tr.y,x2=br.x,y2=br.y,x3=bl.x,y3=bl.y;
+            double dx1=x1-x2, dx2=x3-x2, dx3=x0-x1+x2-x3;
+            double dy1=y1-y2, dy2=y3-y2, dy3=y0-y1+y2-y3;
+            double g=0,h=0;
+            if (Math.abs(dx3)>1e-9 || Math.abs(dy3)>1e-9) {
+                double det=dx1*dy2-dx2*dy1;
+                if (Math.abs(det)<1e-9) return null;
+                g=(dx3*dy2-dx2*dy3)/det;
+                h=(dx1*dy3-dx3*dy1)/det;
+            }
+            return new Homography(x1-x0+g*x1, x3-x0+h*x3, x0,
+                    y1-y0+g*y1, y3-y0+h*y3, y0, g, h);
+        }
+        Marker20mmDetector.Point map(double u,double v) {
+            double d=a31*u+a32*v+1.0;
+            return new Marker20mmDetector.Point((float)((a11*u+a12*v+a13)/d),
+                    (float)((a21*u+a22*v+a23)/d));
+        }
+    }
 
-        @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) { viewWidth = w; viewHeight = h; }
-        void setRulerPixels(float px) { if (px > 20f) { rulerPixels = AutoRulerModel.clampPixels(px); invalidate(); } }
-        float getRulerPixels() { return rulerPixels; }
-        void resetRulerToDisplayCm() { rulerPixels = displayOneCmPixels; invalidate(); }
-        void adjustRuler(float factor) { rulerPixels = AutoRulerModel.clampPixels(rulerPixels * factor); invalidate(); }
-        void setCalibrationState(float distanceCm, boolean ok, float zoom) { fixedDistanceCm = distanceCm; calibrated = ok; calibratedZoom = zoom; invalidate(); }
-        void setCalibrationMode(boolean enabled) { calibrationMode = enabled; invalidate(); }
-        void setLiveAutoState(float distanceCm, float zoom, boolean auto) { liveDistanceCm = distanceCm; liveZoom = zoom; autoDistance = auto; invalidate(); }
-        void setThreadMeasurement(int fullLines, float threadsPerCm, float confidence, boolean stable, float[] centers, String status) {
-            measuredFullLines = fullLines; measuredThreadsPerCm = threadsPerCm; measuredConfidence = confidence;
-            measuredStable = stable; measuredCenters = centers == null ? new float[0] : centers.clone(); measurementStatus = status == null ? "" : status; invalidate();
-        }
-        RulerGeometry snapshotGeometry() {
-            float cx = viewWidth / 2f, cy = viewHeight / 2f;
-            float left = cx - rulerPixels / 2f, right = cx + rulerPixels / 2f, y = cy - 38f * density;
-            return new RulerGeometry(left, right, y, viewWidth, viewHeight,
-                    left >= 8f * density && right <= viewWidth - 8f * density);
-        }
-        void showFocusMarker(float x, float y) { focusX = x; focusY = y; focusTime = System.currentTimeMillis(); invalidate(); }
+    private static final class MarkerOverlay extends View {
+        private final Paint markerPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint stablePaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint focusPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float[] corners=new float[0];
+        private float xDensity,yDensity;
+        private boolean stable;
+        private float markerConfidence;
+        private String message="";
+        private float focusX=-1,focusY=-1; private long focusTime;
 
-        @Override protected void onDraw(Canvas canvas) {
+        MarkerOverlay(NativeCameraActivity c) {
+            super(c); setWillNotDraw(false);
+            float d=getResources().getDisplayMetrics().density;
+            markerPaint.setColor(0xFFFFD54F); markerPaint.setStyle(Paint.Style.STROKE); markerPaint.setStrokeWidth(3f*d);
+            stablePaint.setColor(0xFF67E8D1); stablePaint.setStyle(Paint.Style.STROKE); stablePaint.setStrokeWidth(4f*d);
+            textPaint.setColor(Color.WHITE); textPaint.setTextSize(13f*d); textPaint.setFakeBoldText(true);
+            focusPaint.setColor(0xFF67E8D1); focusPaint.setStyle(Paint.Style.STROKE); focusPaint.setStrokeWidth(2f*d);
+        }
+        void setMarker(float[] c,float confidence,boolean isStable){corners=c==null?new float[0]:c.clone();markerConfidence=confidence;stable=isStable;message="";invalidate();}
+        void clearMarker(String msg){corners=new float[0];stable=false;message=msg;invalidate();}
+        void setResults(float x,float y,boolean s){xDensity=x;yDensity=y;stable=s;invalidate();}
+        void showFocus(float x,float y){focusX=x;focusY=y;focusTime=System.currentTimeMillis();invalidate();}
+        @Override protected void onDraw(Canvas canvas){
             super.onDraw(canvas);
-            RulerGeometry g = snapshotGeometry(); float cx = g.viewWidth / 2f, cy = g.viewHeight / 2f, y = g.y, len = g.right - g.left;
-            canvas.drawRoundRect(new RectF(Math.max(6f*density,g.left-14f*density), y-44f*density,
-                    Math.min(getWidth()-6f*density,g.right+14f*density), y+75f*density), 12f*density,12f*density,panelPaint);
-            for (int s=0;s<SCAN_LINES;s++) { float off=(s-SCAN_LINES/2f)*2.2f*density; canvas.drawLine(g.left,y+off,g.right,y+off,scanPaint); }
-            canvas.drawLine(g.left,y,g.right,y,shadowPaint); canvas.drawLine(g.left,y,g.right,y,linePaint);
-            for (int i=0;i<=10;i++) { float x=g.left+len*i/10f; float t=(i==0||i==10)?13f*density:(i==5?10f*density:7f*density);
-                canvas.drawLine(x,y-t,x,y+t,shadowPaint); canvas.drawLine(x,y-t,x,y+t,linePaint); }
-            for (float n:measuredCenters) if(n>=0f&&n<=1f){ float x=g.left+len*n; canvas.drawLine(x,y-18f*density,x,y+18f*density,markerPaint); canvas.drawCircle(x,y,3.2f*density,markerPaint); }
-            String title = calibrationMode
-                    ? String.format(Locale.US,"BASE 1 cm • %.2f× • %.1f cm",calibratedZoom,fixedDistanceCm)
-                    : calibrated
-                    ? String.format(Locale.US,"AUTO 1 cm • %.2f× • %.1f cm %s",liveZoom,liveDistanceCm,autoDistance?"AUTO":"MANUAL")
-                    : "CALIBRATE REAL 1 cm ONCE";
-            if(!g.fits) title="AUTO 1 cm خارج الشاشة — غيّر Zoom/Distance";
-            float tw=textPaint.measureText(title); canvas.drawText(title,Math.max(8f*density,cx-tw/2f),y-25f*density,textPaint);
-            String count=measuredFullLines>0?String.format(Locale.US,"%d خطوط • %.1f n/cm • %s",measuredFullLines,measuredThreadsPerCm,measuredStable?"STABLE":"MEASURING")
-                    :(!measurementStatus.isEmpty()?measurementStatus:"9 SCANS داخل Auto 1 cm");
-            float cw=textPaint.measureText(count); canvas.drawText(count,Math.max(8f*density,cx-cw/2f),y+51f*density,textPaint);
-            if(measuredStable&&measuredConfidence>0.42f) canvas.drawLine(g.left,y+61f*density,g.right,y+61f*density,stablePaint);
-            float arm=19f*density; canvas.drawLine(cx-arm,cy,cx+arm,cy,linePaint); canvas.drawLine(cx,cy-arm,cx,cy+arm,linePaint);
-            if(focusX>=0f&&System.currentTimeMillis()-focusTime<1200L){ float r=18f*density; canvas.drawCircle(focusX,focusY,r,focusPaint); postInvalidateOnAnimation(); }
+            if(corners.length==8){
+                Path p=new Path();p.moveTo(corners[0],corners[1]);p.lineTo(corners[2],corners[3]);p.lineTo(corners[4],corners[5]);p.lineTo(corners[6],corners[7]);p.close();
+                canvas.drawPath(p,stable?stablePaint:markerPaint);
+                for(int i=0;i<4;i++)canvas.drawCircle(corners[i*2],corners[i*2+1],8f,getResources().getDisplayMetrics().density>2?stable?stablePaint:markerPaint:markerPaint);
+                String t=String.format(Locale.US,"20×20 mm • %.0f%%",markerConfidence*100f);
+                canvas.drawText(t,corners[0],Math.max(30f,corners[1]-14f),textPaint);
+                if(xDensity>0f||yDensity>0f){
+                    String r=String.format(Locale.US,"X %.1f • Y %.1f n/cm",xDensity,yDensity);
+                    canvas.drawText(r,corners[6],Math.min(getHeight()-30f,corners[7]+28f),textPaint);
+                }
+            }
+            if(!message.isEmpty())canvas.drawText(message,24f,getHeight()/2f,textPaint);
+            if(focusX>=0&&System.currentTimeMillis()-focusTime<1200){canvas.drawCircle(focusX,focusY,28f,focusPaint);postInvalidateOnAnimation();}
         }
     }
 }
