@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/** Pure-Java 1D periodic line counter used by the centered 1 cm camera ruler. */
+/** Pure-Java 1D periodic line counter. */
 public final class ThreadProfileCounter {
     private ThreadProfileCounter() {}
 
@@ -34,8 +34,13 @@ public final class ThreadProfileCounter {
     }
 
     public static Result analyze(float[] profile) {
-        if (profile == null || profile.length < 60) {
-            return Result.fail("منطقة 1 cm صغيرة في الصورة — استخدم Zoom أكبر.");
+        return analyze(profile, 1.0f);
+    }
+
+    /** Analyze a profile whose physical length is known in centimeters. */
+    public static Result analyze(float[] profile, float physicalLengthCm) {
+        if (profile == null || profile.length < 60 || !(physicalLengthCm > 0f)) {
+            return Result.fail("منطقة القياس صغيرة أو غير صالحة.");
         }
         final int n = profile.length;
         final float[] smoothed = smooth(profile, n > 220 ? 2 : 1);
@@ -45,15 +50,15 @@ public final class ThreadProfileCounter {
         final double p95 = percentile(smoothed, 0.95);
         final double contrastRange = p95 - p05;
         if (std < 2.0 || contrastRange < 8.0) {
-            return Result.fail("التباين ضعيف داخل مسطرة 1 cm — حسّن الإضاءة أو التركيز.");
+            return Result.fail("التباين ضعيف — حسّن الإضاءة أو التركيز.");
         }
 
         final double[] centered = new double[n];
         for (int i = 0; i < n; i++) centered[i] = smoothed[i] - mean;
 
-        final int minLag = Math.max(3, (int) Math.floor((n - 1) / 90.0));
+        final int minLag = Math.max(3, (int) Math.floor((n - 1) / 180.0));
         final int maxLag = Math.min(n / 3, (int) Math.ceil((n - 1) / 3.5));
-        if (maxLag <= minLag + 2) return Result.fail("كبّر الصورة حتى تصبح الخيوط أوضح داخل 1 cm.");
+        if (maxLag <= minLag + 2) return Result.fail("كبّر الصورة حتى تصبح الخيوط أوضح.");
 
         final double[] corr = new double[maxLag + 2];
         double maxCorr = -1.0;
@@ -80,7 +85,7 @@ public final class ThreadProfileCounter {
                 }
             }
         }
-        if (bestCorr < 0.18) return Result.fail("لا يوجد تكرار واضح للخيوط داخل 1 cm.");
+        if (bestCorr < 0.18) return Result.fail("لا يوجد تكرار واضح للخيوط داخل منطقة القياس.");
 
         double pitch = bestLag;
         if (bestLag > minLag && bestLag < maxLag) {
@@ -91,9 +96,7 @@ public final class ThreadProfileCounter {
                 if (Math.abs(delta) <= 1.0) pitch += delta;
             }
         }
-        if (pitch < 4.0) {
-            return Result.fail("الخيوط أدق من دقة الصورة الحالية — استخدم Zoom أكبر.");
-        }
+        if (pitch < 4.0) return Result.fail("الخيوط أدق من دقة الصورة الحالية — استخدم Zoom أكبر.");
 
         final int phaseRange = Math.max(1, (int) Math.round(pitch));
         int bestPhase = 0;
@@ -129,15 +132,11 @@ public final class ThreadProfileCounter {
             int extremum = lo;
             for (int index = lo + 1; index <= hi; index++) {
                 if ((bestPolarity < 0 && smoothed[index] < smoothed[extremum]) ||
-                        (bestPolarity > 0 && smoothed[index] > smoothed[extremum])) {
-                    extremum = index;
-                }
+                        (bestPolarity > 0 && smoothed[index] > smoothed[extremum])) extremum = index;
             }
-            if (centers.isEmpty() || extremum - centers.get(centers.size() - 1) > pitch * 0.45) {
-                centers.add(extremum);
-            }
+            if (centers.isEmpty() || extremum - centers.get(centers.size() - 1) > pitch * 0.45) centers.add(extremum);
         }
-        if (centers.size() < 3) return Result.fail("لم يتم العثور على عدد كافٍ من الخيوط داخل 1 cm.");
+        if (centers.size() < 3) return Result.fail("لم يتم العثور على عدد كافٍ من الخيوط.");
 
         final double[] spacings = new double[centers.size() - 1];
         for (int i = 1; i < centers.size(); i++) spacings[i - 1] = centers.get(i) - centers.get(i - 1);
@@ -151,7 +150,7 @@ public final class ThreadProfileCounter {
 
         final float[] normalized = new float[centers.size()];
         for (int i = 0; i < centers.size(); i++) normalized[i] = centers.get(i) / (float) (n - 1);
-        final float spacingCount = (float) ((n - 1) / medianSpacing);
+        final float spacingCount = (float) (((n - 1) / medianSpacing) / physicalLengthCm);
         return new Result(true, "", centers.size(), (float) pitch, spacingCount,
                 (float) confidence, normalized);
     }
@@ -217,11 +216,6 @@ public final class ThreadProfileCounter {
         return median(deviations);
     }
 
-    private static int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private static double clamp01(double value) {
-        return Math.max(0.0, Math.min(1.0, value));
-    }
+    private static int clamp(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
+    private static double clamp01(double value) { return Math.max(0.0, Math.min(1.0, value)); }
 }
