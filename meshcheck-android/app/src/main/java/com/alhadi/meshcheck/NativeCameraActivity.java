@@ -45,8 +45,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.File;
 import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
-import java.util.Arrays;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -69,36 +67,37 @@ public class NativeCameraActivity extends ComponentActivity {
     private static final String PREF_FIXED_DISTANCE_CM = "fixed_distance_cm";
     private static final String PREF_RULER_BASE_PX = "ruler_base_px_1x";
     private static final String PREF_FIXED_CALIBRATED = "fixed_calibrated";
-    private static final int HISTORY_SIZE = 7;
+    private static final String PREF_CALIBRATION_LOCKED = "calibration_locked";
+    private static final int SCAN_LINES = 9;
 
     private PreviewView previewView;
     private ImageCapture imageCapture;
     private Camera camera;
     private Button captureButton;
     private Button flashButton;
-    private Button fixedDistanceButton;
+    private Button calibrationButton;
     private TextView zoomLabel;
-    private TextView fixedDistanceLabel;
+    private TextView calibrationLabel;
     private TextView threadCountLabel;
     private LinearLayout calibrationPanel;
     private RulerOverlayView rulerOverlayView;
     private ScaleGestureDetector scaleGestureDetector;
     private SharedPreferences preferences;
     private final ExecutorService analyzerExecutor = Executors.newSingleThreadExecutor();
+    private final ThreadCountConsensus.Stabilizer stabilizer = new ThreadCountConsensus.Stabilizer(12, 6);
 
     private boolean torchOn;
     private boolean zoomGestureUsed;
     private volatile boolean calibrationMode;
     private volatile boolean fixedCalibrated;
+    private volatile boolean calibrationLocked;
     private float fixedDistanceCm = 10f;
     private float pendingDistanceCm = 10f;
     private float currentZoomRatio = 1f;
     private float previousZoomRatio = 1f;
+    private volatile int analysisFailures;
 
     private final Object measurementLock = new Object();
-    private final ArrayDeque<Integer> fullLineHistory = new ArrayDeque<>();
-    private final ArrayDeque<Float> confidenceHistory = new ArrayDeque<>();
-    private volatile int analysisFailures;
     private float lastThreadCountPerCm;
     private int lastFullLineCount;
     private float lastThreadConfidence;
@@ -113,12 +112,13 @@ public class NativeCameraActivity extends ComponentActivity {
         fixedDistanceCm = preferences.getFloat(PREF_FIXED_DISTANCE_CM, 10f);
         pendingDistanceCm = fixedDistanceCm;
         fixedCalibrated = preferences.getBoolean(PREF_FIXED_CALIBRATED, false);
+        calibrationLocked = preferences.getBoolean(PREF_CALIBRATION_LOCKED, fixedCalibrated);
 
         buildUi();
         float savedBase = preferences.getFloat(PREF_RULER_BASE_PX, -1f);
         if (savedBase > 0f) rulerOverlayView.setBaseRulerPixelsAt1x(savedBase);
         rulerOverlayView.setFixedDistance(fixedDistanceCm, fixedCalibrated);
-        updateFixedDistanceUi();
+        updateCalibrationUi();
         updateThreadUiWaiting();
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -145,7 +145,7 @@ public class NativeCameraActivity extends ComponentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView topGuide = new TextView(this);
-        topGuide.setText("ضع خيوط المنخل عمودية على مسطرة 1 cm • التطبيق يعد الخطوط الكاملة بين طرفيها");
+        topGuide.setText("ضع خيوط المنخل عمودية على نافذة 1 cm • 9 مسارات عد تعمل تلقائيًا");
         topGuide.setTextColor(Color.WHITE);
         topGuide.setTextSize(13f);
         topGuide.setGravity(Gravity.CENTER);
@@ -164,24 +164,23 @@ public class NativeCameraActivity extends ComponentActivity {
         bottomPanel.setPadding(dp(8), dp(6), dp(8), dp(10));
         bottomPanel.setBackgroundColor(0xB3071318);
 
-        LinearLayout fixedRow = new LinearLayout(this);
-        fixedRow.setOrientation(LinearLayout.HORIZONTAL);
-        fixedRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout calibrationRow = new LinearLayout(this);
+        calibrationRow.setOrientation(LinearLayout.HORIZONTAL);
+        calibrationRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        fixedDistanceLabel = new TextView(this);
-        fixedDistanceLabel.setTextColor(Color.WHITE);
-        fixedDistanceLabel.setTextSize(12f);
-        fixedDistanceLabel.setGravity(Gravity.CENTER_VERTICAL);
-        fixedDistanceLabel.setPadding(dp(6), 0, dp(6), 0);
+        calibrationLabel = new TextView(this);
+        calibrationLabel.setTextColor(Color.WHITE);
+        calibrationLabel.setTextSize(12f);
+        calibrationLabel.setGravity(Gravity.CENTER_VERTICAL);
+        calibrationLabel.setPadding(dp(6), 0, dp(6), 0);
 
-        fixedDistanceButton = new Button(this);
-        fixedDistanceButton.setText("معايرة المسافة");
-        fixedDistanceButton.setTextSize(11f);
-        fixedDistanceButton.setOnClickListener(v -> showDistanceDialog());
+        calibrationButton = new Button(this);
+        calibrationButton.setTextSize(11f);
+        calibrationButton.setOnClickListener(v -> onCalibrationButton());
 
-        fixedRow.addView(fixedDistanceLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.7f));
-        fixedRow.addView(fixedDistanceButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        bottomPanel.addView(fixedRow, new LinearLayout.LayoutParams(
+        calibrationRow.addView(calibrationLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.8f));
+        calibrationRow.addView(calibrationButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bottomPanel.addView(calibrationRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -201,19 +200,19 @@ public class NativeCameraActivity extends ComponentActivity {
         calibrationPanel.setPadding(0, dp(4), 0, dp(4));
 
         Button rulerMinus = new Button(this);
-        rulerMinus.setText("− 2%");
-        rulerMinus.setTextSize(11f);
-        rulerMinus.setOnClickListener(v -> adjustCalibrationRuler(0.98f));
+        rulerMinus.setText("− 0.5%");
+        rulerMinus.setTextSize(10f);
+        rulerMinus.setOnClickListener(v -> adjustCalibrationRuler(0.995f));
 
         Button saveCalibration = new Button(this);
-        saveCalibration.setText("حفظ تطابق 1 cm");
-        saveCalibration.setTextSize(11f);
-        saveCalibration.setOnClickListener(v -> saveFixedDistanceCalibration());
+        saveCalibration.setText("حفظ وقفل 1 cm");
+        saveCalibration.setTextSize(10f);
+        saveCalibration.setOnClickListener(v -> saveOneTimeCalibration());
 
         Button rulerPlus = new Button(this);
-        rulerPlus.setText("+ 2%");
-        rulerPlus.setTextSize(11f);
-        rulerPlus.setOnClickListener(v -> adjustCalibrationRuler(1.02f));
+        rulerPlus.setText("+ 0.5%");
+        rulerPlus.setTextSize(10f);
+        rulerPlus.setOnClickListener(v -> adjustCalibrationRuler(1.005f));
 
         calibrationPanel.addView(rulerMinus, weightedButtonParams());
         calibrationPanel.addView(saveCalibration, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.5f));
@@ -231,11 +230,11 @@ public class NativeCameraActivity extends ComponentActivity {
         zoomRow.addView(makeZoomButton("5×", 5f), weightedButtonParams());
 
         zoomLabel = new TextView(this);
-        zoomLabel.setText("Zoom 1.0×");
+        zoomLabel.setText("1.0×");
         zoomLabel.setTextColor(Color.WHITE);
-        zoomLabel.setTextSize(12f);
+        zoomLabel.setTextSize(11f);
         zoomLabel.setGravity(Gravity.CENTER);
-        zoomRow.addView(zoomLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.4f));
+        zoomRow.addView(zoomLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.25f));
         bottomPanel.addView(zoomRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -289,7 +288,7 @@ public class NativeCameraActivity extends ComponentActivity {
 
             @Override
             public boolean onScale(@NonNull ScaleGestureDetector detector) {
-                if (camera == null) return false;
+                if (camera == null || calibrationMode) return false;
                 ZoomState state = camera.getCameraInfo().getZoomState().getValue();
                 if (state == null) return false;
                 setZoomRatio(state.getZoomRatio() * detector.getScaleFactor());
@@ -311,9 +310,11 @@ public class NativeCameraActivity extends ComponentActivity {
     private Button makeZoomButton(String label, float ratio) {
         Button button = new Button(this);
         button.setText(label);
-        button.setTextSize(11f);
-        button.setPadding(dp(3), 0, dp(3), 0);
-        button.setOnClickListener(v -> setZoomRatio(ratio));
+        button.setTextSize(10f);
+        button.setPadding(dp(2), 0, dp(2), 0);
+        button.setOnClickListener(v -> {
+            if (!calibrationMode) setZoomRatio(ratio);
+        });
         return button;
     }
 
@@ -355,9 +356,13 @@ public class NativeCameraActivity extends ComponentActivity {
                     rulerOverlayView.setZoomRatio(currentZoomRatio);
                     if (Math.abs(currentZoomRatio - previousZoomRatio) > 0.08f) {
                         previousZoomRatio = currentZoomRatio;
-                        resetThreadHistory();
+                        resetMeasurement();
                     }
                 });
+
+                if (!fixedCalibrated) {
+                    runOnUiThread(() -> showDistanceDialog(false));
+                }
             } catch (ExecutionException exception) {
                 Toast.makeText(this, "تعذر تشغيل الكاميرا: " + exception.getMessage(), Toast.LENGTH_LONG).show();
             } catch (InterruptedException exception) {
@@ -372,35 +377,37 @@ public class NativeCameraActivity extends ComponentActivity {
     private void analyzeFrame(@NonNull ImageProxy image) {
         try {
             if (!fixedCalibrated || calibrationMode) {
-                postThreadWaiting(calibrationMode
-                        ? "أكمل مطابقة مسطرة 1 cm ثم احفظ المعايرة."
-                        : "عاير مسطرة 1 cm أولاً لكي يبدأ عد الخيوط.");
+                postWaiting(calibrationMode ? "المعايرة جارية..." : "أكمل معايرة 1 cm مرة واحدة.");
                 return;
             }
+
             RulerGeometry geometry = rulerOverlayView.snapshotGeometry();
             if (!geometry.valid || !geometry.fits) {
-                postThreadFailure("مسطرة 1 cm لا تقع كاملة داخل مجال الكاميرا — خفّض Zoom.");
+                postFailure("نافذة 1 cm خارج مجال الصورة — خفّض Zoom.");
                 return;
             }
-            float[] profile = buildRulerProfile(image, geometry);
-            if (profile == null) {
-                postThreadFailure("تعذر ربط مسطرة 1 cm بصورة الكاميرا. ثبّت الهاتف وحاول مرة أخرى.");
+
+            ThreadProfileCounter.Result[] scans = buildAndAnalyzeScanLines(image, geometry);
+            if (scans == null) {
+                postFailure("تعذر قراءة نافذة 1 cm من الصورة.");
                 return;
             }
-            ThreadProfileCounter.Result result = ThreadProfileCounter.analyze(profile);
-            if (!result.ok) {
-                postThreadFailure(result.reason);
+
+            ThreadCountConsensus.FrameResult frame = ThreadCountConsensus.fuse(scans);
+            if (!frame.ok) {
+                postFailure(frame.reason);
                 return;
             }
-            acceptThreadMeasurement(result);
+
+            acceptFrame(frame);
         } catch (Exception exception) {
-            postThreadFailure("تعذر عد الخيوط: " + exception.getMessage());
+            postFailure("تعذر عد الخيوط: " + exception.getMessage());
         } finally {
             image.close();
         }
     }
 
-    private float[] buildRulerProfile(ImageProxy image, RulerGeometry geometry) {
+    private ThreadProfileCounter.Result[] buildAndAnalyzeScanLines(ImageProxy image, RulerGeometry geometry) {
         if (geometry.viewWidth <= 0 || geometry.viewHeight <= 0) return null;
         int sourceWidth = image.getWidth();
         int sourceHeight = image.getHeight();
@@ -418,36 +425,43 @@ public class NativeCameraActivity extends ComponentActivity {
 
         float rotatedLeft = (geometry.left - offsetX) / scale;
         float rotatedRight = (geometry.right - offsetX) / scale;
-        float rotatedY = (geometry.y - offsetY) / scale;
-        if (rotatedLeft < 0 || rotatedRight >= rotatedWidth || rotatedY < 0 || rotatedY >= rotatedHeight) return null;
+        float rotatedCenterY = (geometry.y - offsetY) / scale;
+        if (rotatedLeft < 0 || rotatedRight >= rotatedWidth || rotatedCenterY < 0 || rotatedCenterY >= rotatedHeight) {
+            return null;
+        }
 
         int samples = Math.max(1, Math.round(rotatedRight - rotatedLeft) + 1);
         if (samples < 60) return null;
-        int bandRadius = Math.max(2, Math.min(6, samples / 120));
-        float[] profile = new float[samples];
 
         ImageProxy.PlaneProxy yPlane = image.getPlanes()[0];
         ByteBuffer buffer = yPlane.getBuffer();
         int rowStride = yPlane.getRowStride();
         int pixelStride = yPlane.getPixelStride();
 
-        for (int i = 0; i < samples; i++) {
-            float rx = rotatedLeft + (rotatedRight - rotatedLeft) * i / Math.max(1f, samples - 1f);
-            float sum = 0f;
-            int count = 0;
-            for (int dy = -bandRadius; dy <= bandRadius; dy++) {
-                float ry = rotatedY + dy;
-                if (ry < 0 || ry >= rotatedHeight) continue;
-                int[] source = rotatedToSource(rx, ry, sourceWidth, sourceHeight, rotation);
-                int index = source[1] * rowStride + source[0] * pixelStride;
-                if (index >= 0 && index < buffer.limit()) {
-                    sum += buffer.get(index) & 0xFF;
-                    count++;
+        float scanSpacing = Math.max(2f, Math.min(6f, samples / 160f));
+        ThreadProfileCounter.Result[] results = new ThreadProfileCounter.Result[SCAN_LINES];
+        int middle = SCAN_LINES / 2;
+
+        for (int scan = 0; scan < SCAN_LINES; scan++) {
+            float ry = rotatedCenterY + (scan - middle) * scanSpacing;
+            float[] profile = new float[samples];
+            for (int i = 0; i < samples; i++) {
+                float rx = rotatedLeft + (rotatedRight - rotatedLeft) * i / Math.max(1f, samples - 1f);
+                float sum = 0f;
+                int count = 0;
+                for (int local = -1; local <= 1; local++) {
+                    int[] source = rotatedToSource(rx, ry + local, sourceWidth, sourceHeight, rotation);
+                    int index = source[1] * rowStride + source[0] * pixelStride;
+                    if (index >= 0 && index < buffer.limit()) {
+                        sum += buffer.get(index) & 0xFF;
+                        count++;
+                    }
                 }
+                profile[i] = count > 0 ? sum / count : 0f;
             }
-            profile[i] = count > 0 ? sum / count : 0f;
+            results[scan] = ThreadProfileCounter.analyze(profile);
         }
-        return profile;
+        return results;
     }
 
     private static int[] rotatedToSource(float rx, float ry, int width, int height, int rotation) {
@@ -476,54 +490,46 @@ public class NativeCameraActivity extends ComponentActivity {
         return new int[]{sx, sy};
     }
 
-    private void acceptThreadMeasurement(ThreadProfileCounter.Result result) {
-        final int currentFullLines = result.fullLineCount;
-        final float stableCount;
-        final float stableConfidence;
-        final boolean stable;
+    private void acceptFrame(ThreadCountConsensus.FrameResult frame) {
+        analysisFailures = 0;
+        ThreadCountConsensus.Snapshot snapshot = stabilizer.push(frame);
+
         synchronized (measurementLock) {
-            analysisFailures = 0;
-            fullLineHistory.addLast(currentFullLines);
-            confidenceHistory.addLast(result.confidence);
-            while (fullLineHistory.size() > HISTORY_SIZE) fullLineHistory.removeFirst();
-            while (confidenceHistory.size() > HISTORY_SIZE) confidenceHistory.removeFirst();
-
-            stableCount = trimmedAverage(fullLineHistory);
-            stableConfidence = average(confidenceHistory);
-            int min = Integer.MAX_VALUE, max = Integer.MIN_VALUE;
-            for (int value : fullLineHistory) {
-                min = Math.min(min, value);
-                max = Math.max(max, value);
-            }
-            stable = fullLineHistory.size() >= 4 && max - min <= 2
-                    && (max - min) / Math.max(1f, stableCount) <= 0.16f;
-
-            lastFullLineCount = currentFullLines;
-            lastThreadCountPerCm = stableCount;
-            lastThreadConfidence = Math.max(0f, Math.min(1f, stableConfidence * (stable ? 1f : 0.82f)));
-            lastThreadStable = stable;
+            lastFullLineCount = frame.currentFullLineCount;
+            lastThreadCountPerCm = snapshot.threadsPerCm > 0f ? snapshot.threadsPerCm : frame.threadsPerCm;
+            lastThreadConfidence = snapshot.confidence > 0f ? snapshot.confidence : frame.confidence;
+            lastThreadStable = snapshot.stable;
         }
 
         runOnUiThread(() -> {
-            String state = stable ? "ثابت" : "جارٍ التثبيت";
+            String state = snapshot.stable ? "✓ ثابت" : "جارٍ التثبيت " + snapshot.samples + "/6";
             threadCountLabel.setText(String.format(Locale.US,
-                    "داخل 1 cm: %d خطوط كاملة • المتوسط %.1f خيط/سم • %s",
-                    currentFullLines, stableCount, state));
-            rulerOverlayView.setThreadMeasurement(currentFullLines, stableCount,
-                    lastThreadConfidence, stable, result.centersNormalized, "");
+                    "1 cm: %d خطوط كاملة • %.1f خيط/سم • %s • %d/%d مسارات",
+                    frame.currentFullLineCount,
+                    lastThreadCountPerCm,
+                    state,
+                    frame.validScans,
+                    frame.totalScans));
+            rulerOverlayView.setThreadMeasurement(
+                    frame.currentFullLineCount,
+                    lastThreadCountPerCm,
+                    lastThreadConfidence,
+                    snapshot.stable,
+                    frame.centersNormalized,
+                    "");
         });
     }
 
-    private void postThreadFailure(String reason) {
+    private void postFailure(String reason) {
         analysisFailures++;
-        if (analysisFailures >= 4) resetThreadHistory();
+        if (analysisFailures >= 5) resetMeasurement();
         runOnUiThread(() -> {
             threadCountLabel.setText("عدد الخيوط: " + reason);
             rulerOverlayView.setThreadMeasurement(0, 0f, 0f, false, new float[0], reason);
         });
     }
 
-    private void postThreadWaiting(String reason) {
+    private void postWaiting(String reason) {
         runOnUiThread(() -> {
             threadCountLabel.setText("عدد الخيوط: " + reason);
             rulerOverlayView.setThreadMeasurement(0, 0f, 0f, false, new float[0], reason);
@@ -532,16 +538,15 @@ public class NativeCameraActivity extends ComponentActivity {
 
     private void updateThreadUiWaiting() {
         if (!fixedCalibrated) {
-            threadCountLabel.setText("عدد الخيوط: عاير مسطرة 1 cm ثم ضع الخيوط أمامها.");
+            threadCountLabel.setText("عدد الخيوط: عاير 1 cm مرة واحدة فقط.");
         } else {
-            threadCountLabel.setText("عدد الخيوط: جارٍ عد الخطوط الكاملة داخل 1 cm...");
+            threadCountLabel.setText("عدد الخيوط: جارٍ دمج 9 مسارات داخل 1 cm...");
         }
     }
 
-    private void resetThreadHistory() {
+    private void resetMeasurement() {
+        stabilizer.reset();
         synchronized (measurementLock) {
-            fullLineHistory.clear();
-            confidenceHistory.clear();
             lastThreadCountPerCm = 0f;
             lastFullLineCount = 0;
             lastThreadConfidence = 0f;
@@ -553,24 +558,128 @@ public class NativeCameraActivity extends ComponentActivity {
         });
     }
 
-    private static float trimmedAverage(ArrayDeque<Integer> values) {
-        if (values.isEmpty()) return 0f;
-        int[] copy = new int[values.size()];
-        int index = 0;
-        for (int value : values) copy[index++] = value;
-        Arrays.sort(copy);
-        int from = copy.length >= 5 ? 1 : 0;
-        int to = copy.length >= 5 ? copy.length - 1 : copy.length;
-        float sum = 0f;
-        for (int i = from; i < to; i++) sum += copy[i];
-        return sum / Math.max(1, to - from);
+    private void onCalibrationButton() {
+        if (!fixedCalibrated || !calibrationLocked) {
+            showDistanceDialog(false);
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Reset calibration")
+                .setMessage("المعايرة محفوظة ومقفلة. أعد ضبطها فقط إذا تغيّر الهاتف أو طريقة تثبيت المسافة.")
+                .setNegativeButton("إلغاء", null)
+                .setPositiveButton("Reset", (dialog, which) -> resetCalibration())
+                .show();
     }
 
-    private static float average(ArrayDeque<Float> values) {
-        if (values.isEmpty()) return 0f;
-        float sum = 0f;
-        for (float value : values) sum += value;
-        return sum / values.size();
+    private void resetCalibration() {
+        fixedCalibrated = false;
+        calibrationLocked = false;
+        calibrationMode = false;
+        preferences.edit()
+                .remove(PREF_FIXED_DISTANCE_CM)
+                .remove(PREF_RULER_BASE_PX)
+                .putBoolean(PREF_FIXED_CALIBRATED, false)
+                .putBoolean(PREF_CALIBRATION_LOCKED, false)
+                .apply();
+        rulerOverlayView.resetBaseRulerToDisplayDefault();
+        rulerOverlayView.setFixedDistance(10f, false);
+        fixedDistanceCm = 10f;
+        pendingDistanceCm = 10f;
+        calibrationPanel.setVisibility(View.GONE);
+        resetMeasurement();
+        updateCalibrationUi();
+        showDistanceDialog(false);
+    }
+
+    private void showDistanceDialog(boolean forcedReset) {
+        if (calibrationLocked && fixedCalibrated && !forcedReset) return;
+
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        input.setText(String.format(Locale.US, "%.1f", fixedDistanceCm));
+        input.setSelectAllOnFocus(true);
+
+        new AlertDialog.Builder(this)
+                .setTitle("المعايرة مرة واحدة")
+                .setMessage("ثبت الهاتف على المسافة التي ستستخدمها دائمًا. ضع مرجعًا حقيقيًا 1 cm في نفس مستوى المنخل. بعد الحفظ لن يطلب التطبيق المعايرة مرة أخرى.")
+                .setView(input)
+                .setNegativeButton("إلغاء", null)
+                .setPositiveButton("ابدأ", (dialog, which) -> {
+                    try {
+                        float value = Float.parseFloat(input.getText().toString().trim());
+                        if (!(value >= 2f && value <= 100f)) throw new NumberFormatException();
+                        beginCalibration(value);
+                    } catch (NumberFormatException exception) {
+                        Toast.makeText(this, "أدخل مسافة صحيحة بين 2 و100 cm.", Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
+    }
+
+    private void beginCalibration(float distanceCm) {
+        pendingDistanceCm = distanceCm;
+        calibrationMode = true;
+        calibrationLocked = false;
+        resetMeasurement();
+        setZoomRatio(1f);
+        calibrationPanel.setVisibility(View.VISIBLE);
+        rulerOverlayView.setCalibrationMode(true);
+        rulerOverlayView.setFixedDistance(pendingDistanceCm, false);
+        calibrationLabel.setText(String.format(Locale.US,
+                "طابق الخط بدقة مع مرجع حقيقي 1 cm • %.1f cm • Zoom 1×",
+                pendingDistanceCm));
+        calibrationButton.setText("إلغاء");
+        calibrationButton.setOnClickListener(v -> cancelCalibration());
+    }
+
+    private void cancelCalibration() {
+        calibrationMode = false;
+        calibrationPanel.setVisibility(View.GONE);
+        rulerOverlayView.setCalibrationMode(false);
+        rulerOverlayView.setFixedDistance(fixedDistanceCm, fixedCalibrated);
+        calibrationButton.setOnClickListener(v -> onCalibrationButton());
+        updateCalibrationUi();
+        resetMeasurement();
+    }
+
+    private void adjustCalibrationRuler(float factor) {
+        if (!calibrationMode) return;
+        rulerOverlayView.adjustBaseRuler(factor);
+    }
+
+    private void saveOneTimeCalibration() {
+        if (!calibrationMode) return;
+        fixedDistanceCm = pendingDistanceCm;
+        fixedCalibrated = true;
+        calibrationLocked = true;
+        preferences.edit()
+                .putFloat(PREF_FIXED_DISTANCE_CM, fixedDistanceCm)
+                .putFloat(PREF_RULER_BASE_PX, rulerOverlayView.getBaseRulerPixelsAt1x())
+                .putBoolean(PREF_FIXED_CALIBRATED, true)
+                .putBoolean(PREF_CALIBRATION_LOCKED, true)
+                .apply();
+
+        calibrationMode = false;
+        calibrationPanel.setVisibility(View.GONE);
+        rulerOverlayView.setCalibrationMode(false);
+        rulerOverlayView.setFixedDistance(fixedDistanceCm, true);
+        calibrationButton.setOnClickListener(v -> onCalibrationButton());
+        updateCalibrationUi();
+        resetMeasurement();
+        Toast.makeText(this, "تم حفظ وقفل معايرة 1 cm. لن تُطلب مرة أخرى.", Toast.LENGTH_LONG).show();
+    }
+
+    private void updateCalibrationUi() {
+        if (fixedCalibrated && calibrationLocked) {
+            calibrationLabel.setText(String.format(Locale.US,
+                    "✓ Calibration LOCKED • 1 cm • Fixed %.1f cm",
+                    fixedDistanceCm));
+            calibrationButton.setText("Reset");
+        } else {
+            calibrationLabel.setText("المعايرة غير محفوظة — مطلوبة مرة واحدة فقط");
+            calibrationButton.setText("معايرة");
+        }
     }
 
     private void setZoomRatio(float requestedRatio) {
@@ -593,93 +702,6 @@ public class NativeCameraActivity extends ComponentActivity {
             camera.getCameraControl().startFocusAndMetering(action);
             rulerOverlayView.showFocusMarker(x, y);
         } catch (Exception ignored) {
-        }
-    }
-
-    private void showDistanceDialog() {
-        EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        input.setText(String.format(Locale.US, "%.1f", fixedDistanceCm));
-        input.setSelectAllOnFocus(true);
-
-        new AlertDialog.Builder(this)
-                .setTitle("Fixed Distance")
-                .setMessage("أدخل المسافة من عدسة الهاتف إلى مستوى المنخل بالسنتيمتر. بعدها ضع مرجعًا حقيقيًا 1 cm في نفس المستوى وطابق المسطرة الوسطية معه.")
-                .setView(input)
-                .setNegativeButton("إلغاء", null)
-                .setPositiveButton("ابدأ المعايرة", (dialog, which) -> {
-                    try {
-                        float value = Float.parseFloat(input.getText().toString().trim());
-                        if (!(value >= 2f && value <= 100f)) throw new NumberFormatException();
-                        beginCalibration(value);
-                    } catch (NumberFormatException exception) {
-                        Toast.makeText(this, "أدخل مسافة صحيحة بين 2 و100 cm.", Toast.LENGTH_LONG).show();
-                    }
-                })
-                .show();
-    }
-
-    private void beginCalibration(float distanceCm) {
-        pendingDistanceCm = distanceCm;
-        calibrationMode = true;
-        resetThreadHistory();
-        calibrationPanel.setVisibility(View.VISIBLE);
-        rulerOverlayView.setCalibrationMode(true);
-        rulerOverlayView.setFixedDistance(pendingDistanceCm, false);
-        fixedDistanceLabel.setText(String.format(Locale.US,
-                "معايرة %.1f cm: طابق الخط مع مرجع حقيقي 1 cm",
-                pendingDistanceCm));
-        fixedDistanceButton.setText("إلغاء المعايرة");
-        fixedDistanceButton.setOnClickListener(v -> cancelCalibration());
-    }
-
-    private void cancelCalibration() {
-        calibrationMode = false;
-        calibrationPanel.setVisibility(View.GONE);
-        rulerOverlayView.setCalibrationMode(false);
-        rulerOverlayView.setFixedDistance(fixedDistanceCm, fixedCalibrated);
-        fixedDistanceButton.setText("معايرة المسافة");
-        fixedDistanceButton.setOnClickListener(v -> showDistanceDialog());
-        updateFixedDistanceUi();
-        resetThreadHistory();
-    }
-
-    private void adjustCalibrationRuler(float factor) {
-        if (!calibrationMode) return;
-        rulerOverlayView.adjustBaseRuler(factor);
-        resetThreadHistory();
-    }
-
-    private void saveFixedDistanceCalibration() {
-        if (!calibrationMode) return;
-        fixedDistanceCm = pendingDistanceCm;
-        fixedCalibrated = true;
-        preferences.edit()
-                .putFloat(PREF_FIXED_DISTANCE_CM, fixedDistanceCm)
-                .putFloat(PREF_RULER_BASE_PX, rulerOverlayView.getBaseRulerPixelsAt1x())
-                .putBoolean(PREF_FIXED_CALIBRATED, true)
-                .apply();
-
-        calibrationMode = false;
-        calibrationPanel.setVisibility(View.GONE);
-        rulerOverlayView.setCalibrationMode(false);
-        rulerOverlayView.setFixedDistance(fixedDistanceCm, true);
-        fixedDistanceButton.setText("إعادة المعايرة");
-        fixedDistanceButton.setOnClickListener(v -> showDistanceDialog());
-        updateFixedDistanceUi();
-        resetThreadHistory();
-        Toast.makeText(this, "تم حفظ معايرة 1 cm. سيبدأ الآن عد الخيوط داخلها.", Toast.LENGTH_SHORT).show();
-    }
-
-    private void updateFixedDistanceUi() {
-        if (fixedCalibrated) {
-            fixedDistanceLabel.setText(String.format(Locale.US,
-                    "✓ Fixed %.1f cm — مسطرة 1 cm هي مقياس العد",
-                    fixedDistanceCm));
-            fixedDistanceButton.setText("إعادة المعايرة");
-        } else {
-            fixedDistanceLabel.setText("Fixed Distance غير معاير — استخدم مرجع 1 cm مرة واحدة");
-            fixedDistanceButton.setText("معايرة المسافة");
         }
     }
 
@@ -773,7 +795,9 @@ public class NativeCameraActivity extends ComponentActivity {
         private final Paint focusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint markerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint stablePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint scanPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float density;
+        private final float displayDefaultRulerPixelsAt1x;
 
         private volatile float baseRulerPixelsAt1x;
         private volatile float zoomRatio = 1f;
@@ -800,14 +824,15 @@ public class NativeCameraActivity extends ComponentActivity {
             density = metrics.density;
             float xdpi = metrics.xdpi;
             if (!(xdpi >= 100f && xdpi <= 1000f)) xdpi = metrics.densityDpi;
-            baseRulerPixelsAt1x = xdpi / 2.54f;
+            displayDefaultRulerPixelsAt1x = xdpi / 2.54f;
+            baseRulerPixelsAt1x = displayDefaultRulerPixelsAt1x;
 
             shadowPaint.setColor(0xDD000000);
             shadowPaint.setStrokeWidth(5f * density);
             linePaint.setColor(Color.WHITE);
             linePaint.setStrokeWidth(2f * density);
             textPaint.setColor(Color.WHITE);
-            textPaint.setTextSize(12f * density);
+            textPaint.setTextSize(11.5f * density);
             textPaint.setFakeBoldText(true);
             panelPaint.setColor(0x76000000);
             focusPaint.setColor(0xFF67E8D1);
@@ -817,6 +842,8 @@ public class NativeCameraActivity extends ComponentActivity {
             markerPaint.setStrokeWidth(2.5f * density);
             stablePaint.setColor(0xFF67E8D1);
             stablePaint.setStrokeWidth(3f * density);
+            scanPaint.setColor(0x5573D7FF);
+            scanPaint.setStrokeWidth(1f * density);
         }
 
         @Override
@@ -831,6 +858,11 @@ public class NativeCameraActivity extends ComponentActivity {
                 baseRulerPixelsAt1x = pixels;
                 invalidate();
             }
+        }
+
+        void resetBaseRulerToDisplayDefault() {
+            baseRulerPixelsAt1x = displayDefaultRulerPixelsAt1x;
+            invalidate();
         }
 
         float getBaseRulerPixelsAt1x() {
@@ -900,8 +932,13 @@ public class NativeCameraActivity extends ComponentActivity {
 
             float panelLeft = Math.max(6f * density, geometry.left - 14f * density);
             float panelRight = Math.min(getWidth() - 6f * density, geometry.right + 14f * density);
-            RectF panel = new RectF(panelLeft, y - 28f * density, panelRight, y + 66f * density);
+            RectF panel = new RectF(panelLeft, y - 42f * density, panelRight, y + 73f * density);
             canvas.drawRoundRect(panel, 12f * density, 12f * density, panelPaint);
+
+            for (int scan = 0; scan < SCAN_LINES; scan++) {
+                float offset = (scan - SCAN_LINES / 2f) * 2.2f * density;
+                canvas.drawLine(geometry.left, y + offset, geometry.right, y + offset, scanPaint);
+            }
 
             canvas.drawLine(geometry.left, y, geometry.right, y, shadowPaint);
             canvas.drawLine(geometry.left, y, geometry.right, y, linePaint);
@@ -912,38 +949,37 @@ public class NativeCameraActivity extends ComponentActivity {
                 canvas.drawLine(x, y - tick, x, y + tick, linePaint);
             }
 
-            float[] centers = measuredCenters;
-            for (float normalized : centers) {
+            for (float normalized : measuredCenters) {
                 if (normalized < 0f || normalized > 1f) continue;
                 float x = geometry.left + rulerLength * normalized;
-                canvas.drawLine(x, y - 17f * density, x, y + 17f * density, markerPaint);
+                canvas.drawLine(x, y - 18f * density, x, y + 18f * density, markerPaint);
                 canvas.drawCircle(x, y, 3.2f * density, markerPaint);
             }
 
             String label;
             if (calibrationMode) {
-                label = String.format(Locale.US, "MATCH REAL 1 cm • %.1f cm • %.1f×", fixedDistanceCm, zoomRatio);
+                label = String.format(Locale.US, "CALIBRATE REAL 1 cm • %.1f cm • LOCK AFTER SAVE", fixedDistanceCm);
             } else if (fixedCalibrated) {
-                label = String.format(Locale.US, "1 cm COUNT WINDOW • Fixed %.1f cm • %.1f×", fixedDistanceCm, zoomRatio);
+                label = String.format(Locale.US, "1 cm COUNT WINDOW • %.1f× • 9 SCANS", zoomRatio);
             } else {
-                label = String.format(Locale.US, "1 cm GUIDE • %.1f×", zoomRatio);
+                label = "1 cm GUIDE • CALIBRATION REQUIRED ONCE";
             }
             if (!geometry.fits) label = "1 cm أكبر من الشاشة — خفّض Zoom";
-            float textWidth = textPaint.measureText(label);
-            canvas.drawText(label, Math.max(8f * density, cx - textWidth / 2f), y + 30f * density, textPaint);
+            float labelWidth = textPaint.measureText(label);
+            canvas.drawText(label, Math.max(8f * density, cx - labelWidth / 2f), y - 24f * density, textPaint);
 
             String countLine;
             if (measuredFullLines > 0) {
-                countLine = String.format(Locale.US, "%d خطوط كاملة داخل 1 cm • %.1f /cm • %s",
+                countLine = String.format(Locale.US, "%d خطوط كاملة • %.1f /cm • %s",
                         measuredFullLines, measuredThreadsPerCm, measuredStable ? "STABLE" : "MEASURING");
             } else if (!measurementStatus.isEmpty()) {
                 countLine = measurementStatus;
             } else {
-                countLine = "يتم عد مراكز الخيوط الواقعة بين طرفي 1 cm";
+                countLine = "يتم دمج 9 مسارات عد داخل 1 cm";
             }
             float countWidth = textPaint.measureText(countLine);
-            canvas.drawText(countLine, Math.max(8f * density, cx - countWidth / 2f), y + 53f * density, textPaint);
-            if (measuredStable && measuredConfidence > 0.45f) {
+            canvas.drawText(countLine, Math.max(8f * density, cx - countWidth / 2f), y + 50f * density, textPaint);
+            if (measuredStable && measuredConfidence > 0.42f) {
                 canvas.drawLine(geometry.left, y + 60f * density, geometry.right, y + 60f * density, stablePaint);
             }
 
