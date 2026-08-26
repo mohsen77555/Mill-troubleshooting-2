@@ -54,7 +54,6 @@ public final class ThreadCountConsensus {
             return FrameResult.fail("لم تتفق خطوط المسح داخل 1 cm — حسّن التركيز والإضاءة.", results.length);
         }
 
-        // First consensus: complete visible line count. This remains the visual cross-check.
         int[] counts = new int[valid.size()];
         for (int i = 0; i < valid.size(); i++) counts[i] = valid.get(i).fullLineCount;
         Arrays.sort(counts);
@@ -69,7 +68,6 @@ public final class ThreadCountConsensus {
             return FrameResult.fail("العد مختلف بين أجزاء نافذة 1 cm — اجعل القماش مسطحًا وثابتًا.", results.length);
         }
 
-        // Second consensus: decimal n/cm from the actual center spacing within the calibrated 1 cm.
         float[] densities = new float[countInliers.size()];
         for (int i = 0; i < countInliers.size(); i++) densities[i] = countInliers.get(i).spacingThreadsPerCm;
         Arrays.sort(densities);
@@ -90,7 +88,6 @@ public final class ThreadCountConsensus {
         for (ThreadProfileCounter.Result r : countInliers) {
             if (Math.abs(r.spacingThreadsPerCm - medianDensity) > densityTolerance) continue;
 
-            // In a finite 1 cm window the number of complete centers can differ from precise n/cm by ~1.
             float edgeDifference = Math.abs(r.spacingThreadsPerCm - r.fullLineCount);
             float edgeAgreement = Math.max(0.55f, 1f - Math.min(1f, edgeDifference / 2.0f));
             float weight = Math.max(0.12f, r.confidence) * edgeAgreement;
@@ -151,12 +148,13 @@ public final class ThreadCountConsensus {
         }
     }
 
-    /** Temporal anti-jitter stabilizer for the precise decimal n/cm measurement. */
+    /** Temporal anti-vibration stabilizer for the precise decimal n/cm measurement. */
     public static final class Stabilizer {
         private final int historySize;
         private final int minimumStableSamples;
         private final ArrayDeque<Float> densityHistory = new ArrayDeque<>();
         private final ArrayDeque<Float> confidenceHistory = new ArrayDeque<>();
+        private float[] previousCenters = new float[0];
 
         public Stabilizer() { this(14, 7); }
 
@@ -171,11 +169,23 @@ public final class ThreadCountConsensus {
                         frame == null ? 0 : frame.currentFullLineCount);
             }
 
+            // Image-based anti-vibration guard. It compares detected thread centers
+            // in the same calibrated 1 cm window, so it catches both phone shake and cloth movement.
+            if (previousCenters.length >= 3 && frame.centersNormalized.length >= 3) {
+                float motion = bestCenterMotion(previousCenters, frame.centersNormalized);
+                previousCenters = frame.centersNormalized.clone();
+                if (motion > 0.018f) { // >0.18 mm movement inside the physical 1 cm window
+                    return snapshot(false, "HOLD — vibration detected", frame.currentFullLineCount);
+                }
+            } else {
+                previousCenters = frame.centersNormalized.clone();
+            }
+
             if (densityHistory.size() >= 4) {
                 float[] existing = toArray(densityHistory);
                 Arrays.sort(existing);
                 float med = median(existing);
-                float tolerance = Math.max(0.45f, med * 0.09f);
+                float tolerance = Math.max(0.38f, med * 0.075f);
                 if (Math.abs(frame.threadsPerCm - med) > tolerance) {
                     return snapshot(false, "تم تجاهل إطار متحرك/شاذ.", frame.currentFullLineCount);
                 }
@@ -191,6 +201,7 @@ public final class ThreadCountConsensus {
         public synchronized void reset() {
             densityHistory.clear();
             confidenceHistory.clear();
+            previousCenters = new float[0];
         }
 
         public synchronized Snapshot current() { return snapshot(false, "", 0); }
@@ -216,8 +227,8 @@ public final class ThreadCountConsensus {
             for (float value : confidenceHistory) confidence += value;
             confidence /= Math.max(1, confidenceHistory.size());
 
-            // Tight enough to hold a stable decimal such as 4.3 or 5.9 instead of flickering.
-            float tolerance = Math.max(0.12f, Math.min(0.45f, mean * 0.025f));
+            // Keeps a stable decimal such as 4.3 or 5.9 instead of flickering between values.
+            float tolerance = Math.max(0.10f, Math.min(0.35f, mean * 0.022f));
             boolean stable = densityHistory.size() >= minimumStableSamples
                     && spread <= tolerance
                     && confidence >= 0.42f;
@@ -226,6 +237,28 @@ public final class ThreadCountConsensus {
             return new Snapshot(accepted, stable, currentFullLineCount, mean,
                     confidence, densityHistory.size(), spread, reason);
         }
+    }
+
+    /**
+     * Finds the smallest median center displacement allowing a ±2 index offset.
+     * This avoids mistaking a thread entering/leaving one edge of the 1 cm window for vibration.
+     */
+    private static float bestCenterMotion(float[] previous, float[] current) {
+        float best = Float.MAX_VALUE;
+        for (int offset = -2; offset <= 2; offset++) {
+            List<Float> differences = new ArrayList<>();
+            for (int i = 0; i < previous.length; i++) {
+                int j = i + offset;
+                if (j < 0 || j >= current.length) continue;
+                differences.add(Math.abs(previous[i] - current[j]));
+            }
+            if (differences.size() < 3) continue;
+            float[] values = new float[differences.size()];
+            for (int i = 0; i < values.length; i++) values[i] = differences.get(i);
+            Arrays.sort(values);
+            best = Math.min(best, median(values));
+        }
+        return best == Float.MAX_VALUE ? 0f : best;
     }
 
     private static float[] toArray(ArrayDeque<Float> values) {
