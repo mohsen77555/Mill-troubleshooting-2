@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="40mm" viewBox="0 0 40 40">
+  <!-- Print at 100% / Actual Size. Cut out the central 20 x 20 mm square. -->
+  <rect x="0" y="0" width="40" height="40" fill="white"/>
+  <!-- Four isolated 5 x 5 mm black detector blocks. Their inward corners define the true 20 x 20 mm window. -->
+  <rect x="5" y="5" width="5" height="5" fill="black"/>
+  <rect x="30" y="5" width="5" height="5" fill="black"/>
+  <rect x="5" y="30" width="5" height="5" fill="black"/>
+  <rect x="30" y="30" width="5" height="5" fill="black"/>
+  <!-- Central cutout guide: exactly 20 x 20 mm. Use a very light line and remove this area. -->
+  <rect x="10" y="10" width="20" height="20" fill="none" stroke="#b0b0b0" stroke-width="0.15" stroke-dasharray="0.7 0.7"/>
+</svg>
