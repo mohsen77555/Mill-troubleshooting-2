@@ -42,16 +42,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Test precise decimal and anti-vibration thread counting
+      - name: Test precise decimal, anti-vibration and Auto 1 cm
         run: |
           mkdir -p build/thread-counter-test
           javac -d build/thread-counter-test \
             app/src/main/java/com/alhadi/meshcheck/ThreadProfileCounter.java \
             app/src/main/java/com/alhadi/meshcheck/ThreadCountConsensus.java \
+            app/src/main/java/com/alhadi/meshcheck/AutoRulerModel.java \
             tests/ThreadProfileCounterTest.java \
-            tests/ThreadCountConsensusTest.java
+            tests/ThreadCountConsensusTest.java \
+            tests/AutoRulerModelTest.java
           java -cp build/thread-counter-test ThreadProfileCounterTest
           java -cp build/thread-counter-test ThreadCountConsensusTest
+          java -cp build/thread-counter-test AutoRulerModelTest
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -72,11 +75,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.12.0-decimal-antivibration-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.13.0-auto-1cm-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.12.0-decimal-antivibration-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.12.0-decimal-antivibration-debug.apk
+          name: MeshCheck-Sefar-v0.13.0-auto-1cm-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.13.0-auto-1cm-debug.apk
           if-no-files-found: error
