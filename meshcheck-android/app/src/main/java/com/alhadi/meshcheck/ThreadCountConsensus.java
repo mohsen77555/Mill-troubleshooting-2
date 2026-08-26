@@ -5,13 +5,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Robust fusion for the centered 1 cm thread counter.
- *
- * IMPORTANT: the reported thread count is based on COMPLETE thread centers observed
- * inside the 1 cm window. Pitch/spacing is used only as a quality-consistency signal,
- * never as the primary count value.
- */
+/** Robust fusion of 9 scan lines inside the calibrated 1 cm camera window. */
 public final class ThreadCountConsensus {
     private ThreadCountConsensus() {}
 
@@ -19,6 +13,7 @@ public final class ThreadCountConsensus {
         public final boolean ok;
         public final String reason;
         public final int currentFullLineCount;
+        /** Precise density from center-to-center spacing inside the calibrated 1 cm window. */
         public final float threadsPerCm;
         public final float confidence;
         public final int validScans;
@@ -49,9 +44,9 @@ public final class ThreadCountConsensus {
         if (results == null || results.length == 0) return FrameResult.fail("لا توجد خطوط مسح.", 0);
 
         List<ThreadProfileCounter.Result> valid = new ArrayList<>();
-        for (ThreadProfileCounter.Result result : results) {
-            if (result != null && result.ok && result.fullLineCount >= 3 && result.confidence >= 0.15f) {
-                valid.add(result);
+        for (ThreadProfileCounter.Result r : results) {
+            if (r != null && r.ok && r.fullLineCount >= 3 && r.spacingThreadsPerCm > 0f && r.confidence >= 0.15f) {
+                valid.add(r);
             }
         }
         int minimum = Math.max(3, (results.length + 1) / 2);
@@ -59,66 +54,77 @@ public final class ThreadCountConsensus {
             return FrameResult.fail("لم تتفق خطوط المسح داخل 1 cm — حسّن التركيز والإضاءة.", results.length);
         }
 
+        // First consensus: complete visible line count. This remains the visual cross-check.
         int[] counts = new int[valid.size()];
         for (int i = 0; i < valid.size(); i++) counts[i] = valid.get(i).fullLineCount;
         Arrays.sort(counts);
-        float median = median(counts);
-        float inlierTolerance = Math.max(1.0f, median * 0.07f);
+        float medianFullCount = median(counts);
+        float fullCountTolerance = Math.max(1.0f, medianFullCount * 0.08f);
 
-        List<ThreadProfileCounter.Result> inliers = new ArrayList<>();
-        for (ThreadProfileCounter.Result result : valid) {
-            if (Math.abs(result.fullLineCount - median) <= inlierTolerance) inliers.add(result);
+        List<ThreadProfileCounter.Result> countInliers = new ArrayList<>();
+        for (ThreadProfileCounter.Result r : valid) {
+            if (Math.abs(r.fullLineCount - medianFullCount) <= fullCountTolerance) countInliers.add(r);
         }
-        if (inliers.size() < minimum) {
+        if (countInliers.size() < minimum) {
             return FrameResult.fail("العد مختلف بين أجزاء نافذة 1 cm — اجعل القماش مسطحًا وثابتًا.", results.length);
         }
 
-        float weightedCount = 0f;
-        float weightSum = 0f;
+        // Second consensus: decimal n/cm from the actual center spacing within the calibrated 1 cm.
+        float[] densities = new float[countInliers.size()];
+        for (int i = 0; i < countInliers.size(); i++) densities[i] = countInliers.get(i).spacingThreadsPerCm;
+        Arrays.sort(densities);
+        float medianDensity = median(densities);
+        float densityTolerance = Math.max(0.20f, medianDensity * 0.065f);
+
+        float weightedDensity = 0f;
+        float densityWeight = 0f;
+        float weightedFullCount = 0f;
+        float fullCountWeight = 0f;
         float confidenceSum = 0f;
-        int min = Integer.MAX_VALUE;
-        int max = Integer.MIN_VALUE;
+        int densityInliers = 0;
+        float minDensity = Float.MAX_VALUE;
+        float maxDensity = -Float.MAX_VALUE;
         ThreadProfileCounter.Result bestVisual = null;
         float bestVisualScore = -1f;
 
-        for (ThreadProfileCounter.Result result : inliers) {
-            // Spacing is only a sanity check. It does NOT determine the returned count.
-            float spacingAgreement = 1f;
-            if (result.spacingThreadsPerCm > 0f) {
-                float relative = Math.abs(result.spacingThreadsPerCm - result.fullLineCount)
-                        / Math.max(1f, result.fullLineCount);
-                spacingAgreement = Math.max(0.45f, 1f - Math.min(1f, relative * 1.8f));
-            }
-            float weight = Math.max(0.12f, result.confidence) * spacingAgreement;
-            weightedCount += result.fullLineCount * weight;
-            weightSum += weight;
-            confidenceSum += result.confidence;
-            min = Math.min(min, result.fullLineCount);
-            max = Math.max(max, result.fullLineCount);
+        for (ThreadProfileCounter.Result r : countInliers) {
+            if (Math.abs(r.spacingThreadsPerCm - medianDensity) > densityTolerance) continue;
 
-            float visualScore = result.confidence * spacingAgreement;
+            // In a finite 1 cm window the number of complete centers can differ from precise n/cm by ~1.
+            float edgeDifference = Math.abs(r.spacingThreadsPerCm - r.fullLineCount);
+            float edgeAgreement = Math.max(0.55f, 1f - Math.min(1f, edgeDifference / 2.0f));
+            float weight = Math.max(0.12f, r.confidence) * edgeAgreement;
+
+            weightedDensity += r.spacingThreadsPerCm * weight;
+            densityWeight += weight;
+            weightedFullCount += r.fullLineCount * weight;
+            fullCountWeight += weight;
+            confidenceSum += r.confidence;
+            densityInliers++;
+            minDensity = Math.min(minDensity, r.spacingThreadsPerCm);
+            maxDensity = Math.max(maxDensity, r.spacingThreadsPerCm);
+
+            float visualScore = r.confidence * edgeAgreement;
             if (visualScore > bestVisualScore) {
                 bestVisualScore = visualScore;
-                bestVisual = result;
+                bestVisual = r;
             }
         }
 
-        float count = weightedCount / Math.max(0.001f, weightSum);
-        float spread = max - min;
-        float scanAgreement = inliers.size() / (float) results.length;
-        float consistency = 1f - Math.min(1f, spread / Math.max(1f, median) * 2.2f);
-        float meanConfidence = confidenceSum / inliers.size();
+        if (densityInliers < minimum || densityWeight <= 0f) {
+            return FrameResult.fail("المسافة بين الخيوط غير مستقرة — ثبّت الهاتف أكثر.", results.length);
+        }
+
+        float preciseDensity = weightedDensity / densityWeight;
+        float visualCount = weightedFullCount / Math.max(0.001f, fullCountWeight);
+        float densitySpread = maxDensity - minDensity;
+        float scanAgreement = densityInliers / (float) results.length;
+        float consistency = 1f - Math.min(1f, densitySpread / Math.max(1f, preciseDensity) * 3.0f);
+        float meanConfidence = confidenceSum / densityInliers;
         float confidence = clamp01(0.55f * meanConfidence + 0.25f * scanAgreement + 0.20f * consistency);
 
-        return new FrameResult(
-                true,
-                "",
-                Math.round(count),
-                count,
-                confidence,
-                inliers.size(),
-                results.length,
-                spread,
+        return new FrameResult(true, "", Math.round(visualCount), preciseDensity, confidence,
+                densityInliers, results.length, densitySpread,
                 bestVisual == null ? new float[0] : bestVisual.centersNormalized.clone());
     }
 
@@ -145,20 +151,18 @@ public final class ThreadCountConsensus {
         }
     }
 
-    /** Temporal stabilizer. Uses only fused full-line counts from consecutive frames. */
+    /** Temporal anti-jitter stabilizer for the precise decimal n/cm measurement. */
     public static final class Stabilizer {
         private final int historySize;
         private final int minimumStableSamples;
-        private final ArrayDeque<Float> countHistory = new ArrayDeque<>();
+        private final ArrayDeque<Float> densityHistory = new ArrayDeque<>();
         private final ArrayDeque<Float> confidenceHistory = new ArrayDeque<>();
 
-        public Stabilizer() {
-            this(12, 6);
-        }
+        public Stabilizer() { this(14, 7); }
 
         public Stabilizer(int historySize, int minimumStableSamples) {
-            this.historySize = Math.max(6, historySize);
-            this.minimumStableSamples = Math.max(4, minimumStableSamples);
+            this.historySize = Math.max(7, historySize);
+            this.minimumStableSamples = Math.max(5, minimumStableSamples);
         }
 
         public synchronized Snapshot push(FrameResult frame) {
@@ -167,61 +171,60 @@ public final class ThreadCountConsensus {
                         frame == null ? 0 : frame.currentFullLineCount);
             }
 
-            if (countHistory.size() >= 4) {
-                float[] existing = toArray(countHistory);
+            if (densityHistory.size() >= 4) {
+                float[] existing = toArray(densityHistory);
                 Arrays.sort(existing);
-                float median = median(existing);
-                float tolerance = Math.max(2.0f, median * 0.18f);
-                if (Math.abs(frame.threadsPerCm - median) > tolerance) {
-                    return snapshot(false, "تم تجاهل إطار شاذ.", frame.currentFullLineCount);
+                float med = median(existing);
+                float tolerance = Math.max(0.45f, med * 0.09f);
+                if (Math.abs(frame.threadsPerCm - med) > tolerance) {
+                    return snapshot(false, "تم تجاهل إطار متحرك/شاذ.", frame.currentFullLineCount);
                 }
             }
 
-            countHistory.addLast(frame.threadsPerCm);
+            densityHistory.addLast(frame.threadsPerCm);
             confidenceHistory.addLast(frame.confidence);
-            while (countHistory.size() > historySize) countHistory.removeFirst();
+            while (densityHistory.size() > historySize) densityHistory.removeFirst();
             while (confidenceHistory.size() > historySize) confidenceHistory.removeFirst();
             return snapshot(true, "", frame.currentFullLineCount);
         }
 
         public synchronized void reset() {
-            countHistory.clear();
+            densityHistory.clear();
             confidenceHistory.clear();
         }
 
-        public synchronized Snapshot current() {
-            return snapshot(false, "", 0);
-        }
+        public synchronized Snapshot current() { return snapshot(false, "", 0); }
 
         private Snapshot snapshot(boolean accepted, String reason, int currentFullLineCount) {
-            if (countHistory.isEmpty()) {
+            if (densityHistory.isEmpty()) {
                 return new Snapshot(accepted, false, currentFullLineCount, 0f, 0f, 0, 0f, reason);
             }
 
-            float[] counts = toArray(countHistory);
-            Arrays.sort(counts);
-            int from = counts.length >= 7 ? 1 : 0;
-            int to = counts.length >= 7 ? counts.length - 1 : counts.length;
+            float[] values = toArray(densityHistory);
+            Arrays.sort(values);
+            int trim = values.length >= 9 ? 2 : (values.length >= 7 ? 1 : 0);
+            int from = trim;
+            int to = values.length - trim;
             float sum = 0f;
-            for (int i = from; i < to; i++) sum += counts[i];
+            for (int i = from; i < to; i++) sum += values[i];
             float mean = sum / Math.max(1, to - from);
-            float low = counts[from];
-            float high = counts[to - 1];
+            float low = values[from];
+            float high = values[to - 1];
             float spread = high - low;
 
             float confidence = 0f;
             for (float value : confidenceHistory) confidence += value;
             confidence /= Math.max(1, confidenceHistory.size());
 
-            float tolerance = Math.max(1.05f, Math.min(2.0f, mean * 0.06f));
-            boolean stable = countHistory.size() >= minimumStableSamples
+            // Tight enough to hold a stable decimal such as 4.3 or 5.9 instead of flickering.
+            float tolerance = Math.max(0.12f, Math.min(0.45f, mean * 0.025f));
+            boolean stable = densityHistory.size() >= minimumStableSamples
                     && spread <= tolerance
                     && confidence >= 0.42f;
-            float stabilityFactor = stable ? 1f : 0.82f;
-            confidence = clamp01(confidence * stabilityFactor);
+            confidence = clamp01(confidence * (stable ? 1f : 0.84f));
 
             return new Snapshot(accepted, stable, currentFullLineCount, mean,
-                    confidence, countHistory.size(), spread, reason);
+                    confidence, densityHistory.size(), spread, reason);
         }
     }
 
@@ -233,18 +236,14 @@ public final class ThreadCountConsensus {
     }
 
     private static float median(int[] sorted) {
-        int middle = sorted.length / 2;
-        if (sorted.length % 2 == 1) return sorted[middle];
-        return (sorted[middle - 1] + sorted[middle]) / 2f;
+        int m = sorted.length / 2;
+        return sorted.length % 2 == 1 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2f;
     }
 
     private static float median(float[] sorted) {
-        int middle = sorted.length / 2;
-        if (sorted.length % 2 == 1) return sorted[middle];
-        return (sorted[middle - 1] + sorted[middle]) / 2f;
+        int m = sorted.length / 2;
+        return sorted.length % 2 == 1 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2f;
     }
 
-    private static float clamp01(float value) {
-        return Math.max(0f, Math.min(1f, value));
-    }
+    private static float clamp01(float value) { return Math.max(0f, Math.min(1f, value)); }
 }
