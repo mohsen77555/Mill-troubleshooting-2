@@ -46,7 +46,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-/** v0.14: automatic 20x20 mm physical marker mode. */
+/** v0.15: user-defined manual 20x20 mm ROI. No marker detection or auto square tracking. */
 public class NativeCameraActivity extends ComponentActivity {
     public static final String EXTRA_CAPTURE_PATH = "meshcheck.capture_path";
     public static final String EXTRA_ZOOM_RATIO = "meshcheck.zoom_ratio";
@@ -62,6 +62,7 @@ public class NativeCameraActivity extends ComponentActivity {
     public static final String EXTRA_FULL_LINE_X = "meshcheck.full_line_x";
     public static final String EXTRA_FULL_LINE_Y = "meshcheck.full_line_y";
     public static final String EXTRA_MARKER_MODE = "meshcheck.marker_20mm";
+    public static final String EXTRA_MANUAL_ROI_MODE = "meshcheck.manual_20mm_roi";
 
     private static final int CAMERA_PERMISSION_REQUEST = 2201;
     private static final int SCAN_LINES = 9;
@@ -72,10 +73,11 @@ public class NativeCameraActivity extends ComponentActivity {
     private Camera camera;
     private Button captureButton;
     private Button flashButton;
+    private Button lockButton;
     private TextView statusLabel;
     private TextView resultLabel;
     private TextView zoomLabel;
-    private MarkerOverlay overlay;
+    private ManualRoiOverlay overlay;
     private ScaleGestureDetector scaleGestureDetector;
     private final ExecutorService analyzerExecutor = Executors.newSingleThreadExecutor();
     private final ThreadCountConsensus.Stabilizer stabilizerX = new ThreadCountConsensus.Stabilizer(14, 7);
@@ -84,14 +86,12 @@ public class NativeCameraActivity extends ComponentActivity {
     private boolean torchOn;
     private boolean zoomGestureUsed;
     private volatile float currentZoomRatio = 1f;
-    private volatile int markerStableFrames;
-    private float[] previousMarkerNormalized = new float[0];
+    private volatile boolean roiLocked;
 
     private final Object measurementLock = new Object();
     private float lastX, lastY, lastConfidence;
     private int lastFullX, lastFullY;
     private boolean lastStable;
-    private boolean markerDetected;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -115,12 +115,12 @@ public class NativeCameraActivity extends ComponentActivity {
         root.addView(previewView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        overlay = new MarkerOverlay(this);
+        overlay = new ManualRoiOverlay(this);
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView guide = new TextView(this);
-        guide.setText("ضع إطار 20×20 mm فوق المنخل • حاذِ أضلاعه مع الخيوط • لا معايرة ولا مسافة");
+        guide.setText("ضع مربع 20×20 mm الحقيقي • اسحب النقاط الأربع إلى زواياه الداخلية • ثم LOCK");
         guide.setTextColor(Color.WHITE);
         guide.setTextSize(13f);
         guide.setGravity(Gravity.CENTER);
@@ -137,7 +137,7 @@ public class NativeCameraActivity extends ComponentActivity {
         bottom.setBackgroundColor(0xB3071318);
 
         statusLabel = new TextView(this);
-        statusLabel.setText("ابحث عن العلامات الأربع...");
+        statusLabel.setText("EDIT 20×20 — طابق النقاط مع المربع الحقيقي");
         statusLabel.setTextColor(Color.WHITE);
         statusLabel.setTextSize(13f);
         statusLabel.setGravity(Gravity.CENTER);
@@ -150,6 +150,30 @@ public class NativeCameraActivity extends ComponentActivity {
         resultLabel.setGravity(Gravity.CENTER);
         resultLabel.setPadding(0, dp(3), 0, dp(3));
         bottom.addView(resultLabel, matchWrap());
+
+        LinearLayout roiRow = new LinearLayout(this);
+        roiRow.setOrientation(LinearLayout.HORIZONTAL);
+        roiRow.setGravity(Gravity.CENTER);
+
+        lockButton = new Button(this);
+        lockButton.setText("LOCK 20×20");
+        lockButton.setTextSize(10f);
+        lockButton.setOnClickListener(v -> toggleRoiLock());
+
+        Button resetArea = new Button(this);
+        resetArea.setText("RESET AREA");
+        resetArea.setTextSize(10f);
+        resetArea.setOnClickListener(v -> {
+            roiLocked = false;
+            overlay.setLocked(false);
+            overlay.resetArea();
+            resetMeasurement();
+            lockButton.setText("LOCK 20×20");
+            statusLabel.setText("EDIT 20×20 — طابق النقاط مع المربع الحقيقي");
+        });
+        roiRow.addView(lockButton, weighted());
+        roiRow.addView(resetArea, weighted());
+        bottom.addView(roiRow, matchWrap());
 
         LinearLayout zoomRow = new LinearLayout(this);
         zoomRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -208,6 +232,27 @@ public class NativeCameraActivity extends ComponentActivity {
         return b;
     }
 
+    private void toggleRoiLock() {
+        if (roiLocked) {
+            roiLocked = false;
+            overlay.setLocked(false);
+            resetMeasurement();
+            lockButton.setText("LOCK 20×20");
+            statusLabel.setText("EDIT 20×20 — عدّل النقاط ثم اضغط LOCK");
+            return;
+        }
+        float[] corners = overlay.snapshotCorners();
+        if (!validQuad(corners)) {
+            Toast.makeText(this, "رتّب النقاط الأربع حول المربع بدون تقاطع.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        roiLocked = true;
+        overlay.setLocked(true);
+        resetMeasurement();
+        lockButton.setText("EDIT AREA");
+        statusLabel.setText("✓ 20×20 LOCKED — العد داخل المربع الذي حددته فقط");
+    }
+
     private void setupTouchControls() {
         scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScaleBegin(@NonNull ScaleGestureDetector detector) {
@@ -262,7 +307,15 @@ public class NativeCameraActivity extends ComponentActivity {
                 camera.getCameraInfo().getZoomState().observe(this, state -> {
                     if (state == null) return;
                     float newZoom = state.getZoomRatio();
-                    if (Math.abs(newZoom - currentZoomRatio) > 0.02f) resetMeasurement();
+                    if (Math.abs(newZoom - currentZoomRatio) > 0.02f) {
+                        if (roiLocked) {
+                            roiLocked = false;
+                            overlay.setLocked(false);
+                            lockButton.setText("LOCK 20×20");
+                            statusLabel.setText("Zoom تغيّر — طابق المربع مرة أخرى ثم LOCK");
+                        }
+                        resetMeasurement();
+                    }
                     currentZoomRatio = newZoom;
                     zoomLabel.setText(String.format(Locale.US, "%.2f×", currentZoomRatio));
                 });
@@ -278,35 +331,17 @@ public class NativeCameraActivity extends ComponentActivity {
 
     private void analyzeFrame(@NonNull ImageProxy image) {
         try {
-            DetectorFrame detectorFrame = makeDetectorFrame(image);
-            Marker20mmDetector.Result marker = Marker20mmDetector.detect(
-                    detectorFrame.gray, detectorFrame.width, detectorFrame.height);
-            if (!marker.ok) {
-                markerDetected = false;
-                markerStableFrames = 0;
-                previousMarkerNormalized = new float[0];
-                stabilizerX.reset(); stabilizerY.reset();
-                runOnUiThread(() -> {
-                    statusLabel.setText("20×20 marker: " + marker.reason);
-                    resultLabel.setText("X: --  •  Y: --");
-                    captureButton.setEnabled(false);
-                    overlay.clearMarker(marker.reason);
-                });
+            if (!roiLocked) return;
+
+            float[] viewCorners = overlay.snapshotCorners();
+            if (!validQuad(viewCorners)) {
+                runOnUiThread(() -> statusLabel.setText("منطقة 20×20 غير صحيحة — اضغط EDIT"));
                 return;
             }
 
-            Marker20mmDetector.Point[] sourceCorners = scaleMarker(marker.corners, detectorFrame.step);
-            boolean markerStable = updateMarkerStability(sourceCorners, image.getWidth(), image.getHeight());
-            float[] viewCorners = sourceCornersToView(sourceCorners, image);
-            runOnUiThread(() -> overlay.setMarker(viewCorners, marker.confidence, markerStable));
-
-            if (!markerStable) {
-                stabilizerX.reset(); stabilizerY.reset();
-                runOnUiThread(() -> {
-                    statusLabel.setText("HOLD — ثبّت الهاتف حتى يثبت مربع 20×20");
-                    resultLabel.setText("X: --  •  Y: --");
-                    captureButton.setEnabled(false);
-                });
+            Marker20mmDetector.Point[] sourceCorners = viewCornersToSource(viewCorners, image);
+            if (sourceCorners == null) {
+                runOnUiThread(() -> statusLabel.setText("المربع خارج صورة الكاميرا — اضغط EDIT"));
                 return;
             }
 
@@ -314,7 +349,7 @@ public class NativeCameraActivity extends ComponentActivity {
             DirectionMeasurement y = measureDirection(image, sourceCorners, false);
             if (!x.ok && !y.ok) {
                 runOnUiThread(() -> {
-                    statusLabel.setText("Marker ثابت، لكن الخيوط غير واضحة — اضغط على القماش للتركيز");
+                    statusLabel.setText("الخيوط غير واضحة داخل المربع — اضغط على القماش للتركيز");
                     captureButton.setEnabled(false);
                 });
                 return;
@@ -322,9 +357,9 @@ public class NativeCameraActivity extends ComponentActivity {
 
             ThreadCountConsensus.Snapshot sx = x.ok ? stabilizerX.push(x.frame) : stabilizerX.current();
             ThreadCountConsensus.Snapshot sy = y.ok ? stabilizerY.push(y.frame) : stabilizerY.current();
-            acceptMeasurements(x, y, sx, sy, marker.confidence);
+            acceptMeasurements(x, y, sx, sy);
         } catch (Exception e) {
-            runOnUiThread(() -> statusLabel.setText("تعذر تحليل marker: " + e.getMessage()));
+            runOnUiThread(() -> statusLabel.setText("تعذر العد داخل المربع: " + e.getMessage()));
         } finally {
             image.close();
         }
@@ -332,26 +367,30 @@ public class NativeCameraActivity extends ComponentActivity {
 
     private void acceptMeasurements(DirectionMeasurement x, DirectionMeasurement y,
                                     ThreadCountConsensus.Snapshot sx,
-                                    ThreadCountConsensus.Snapshot sy,
-                                    float markerConfidence) {
+                                    ThreadCountConsensus.Snapshot sy) {
         float vx = sx.threadsPerCm > 0f ? sx.threadsPerCm : (x.ok ? x.frame.threadsPerCm : 0f);
         float vy = sy.threadsPerCm > 0f ? sy.threadsPerCm : (y.ok ? y.frame.threadsPerCm : 0f);
-        boolean stableX = !x.ok || sx.stable;
-        boolean stableY = !y.ok || sy.stable;
-        boolean stable = (vx > 0f || vy > 0f) && stableX && stableY;
-        float confidence = Math.min(markerConfidence,
-                Math.max(sx.confidence, sy.confidence));
         int fullX = x.ok ? x.frame.currentFullLineCount : 0;
         int fullY = y.ok ? y.frame.currentFullLineCount : 0;
 
+        boolean vibration = (x.ok && !sx.accepted && sx.reason != null && sx.reason.toLowerCase(Locale.US).contains("vibration"))
+                || (y.ok && !sy.accepted && sy.reason != null && sy.reason.toLowerCase(Locale.US).contains("vibration"));
+        boolean stableX = !x.ok || sx.stable;
+        boolean stableY = !y.ok || sy.stable;
+        boolean stable = !vibration && (vx > 0f || vy > 0f) && stableX && stableY;
+        float confidence;
+        if (sx.confidence > 0f && sy.confidence > 0f) confidence = Math.min(sx.confidence, sy.confidence);
+        else confidence = Math.max(sx.confidence, sy.confidence);
+
         synchronized (measurementLock) {
             lastX = vx; lastY = vy; lastFullX = fullX; lastFullY = fullY;
-            lastStable = stable; lastConfidence = confidence; markerDetected = true;
+            lastStable = stable; lastConfidence = confidence;
         }
 
         runOnUiThread(() -> {
-            statusLabel.setText(stable ? "✓ MARKER 20×20 DETECTED • القياس ثابت"
-                    : "MARKER 20×20 DETECTED • جارٍ تثبيت القراءة...");
+            if (vibration) statusLabel.setText("HOLD — اهتزاز، ثبّت الهاتف والمربع داخل الإطار المحدد");
+            else statusLabel.setText(stable ? "✓ 20×20 MANUAL ROI • القياس ثابت"
+                    : "20×20 MANUAL ROI • جارٍ تثبيت القراءة...");
             resultLabel.setText(String.format(Locale.US,
                     "X %.1f n/cm (%d/20mm)  •  Y %.1f n/cm (%d/20mm)",
                     vx, fullX, vy, fullY));
@@ -398,48 +437,9 @@ public class NativeCameraActivity extends ComponentActivity {
         return index >= 0 && index < buffer.limit() ? (buffer.get(index) & 0xFF) : 0f;
     }
 
-    private DetectorFrame makeDetectorFrame(ImageProxy image) {
-        int step = Math.max(1, (int) Math.ceil(image.getWidth() / 520.0));
-        int w = image.getWidth() / step;
-        int h = image.getHeight() / step;
-        byte[] gray = new byte[w * h];
-        ImageProxy.PlaneProxy plane = image.getPlanes()[0];
-        ByteBuffer buffer = plane.getBuffer();
-        int rowStride = plane.getRowStride(), pixelStride = plane.getPixelStride();
-        for (int y = 0; y < h; y++) {
-            int sy = y * step;
-            for (int x = 0; x < w; x++) {
-                int sx = x * step;
-                int index = sy * rowStride + sx * pixelStride;
-                gray[y * w + x] = index < buffer.limit() ? buffer.get(index) : 0;
-            }
-        }
-        return new DetectorFrame(gray, w, h, step);
-    }
-
-    private Marker20mmDetector.Point[] scaleMarker(Marker20mmDetector.Point[] p, int step) {
-        Marker20mmDetector.Point[] out = new Marker20mmDetector.Point[4];
-        for (int i = 0; i < 4; i++) out[i] = new Marker20mmDetector.Point(p[i].x * step, p[i].y * step);
-        return out;
-    }
-
-    private boolean updateMarkerStability(Marker20mmDetector.Point[] q, int width, int height) {
-        float[] now = new float[8];
-        for (int i = 0; i < 4; i++) {
-            now[i * 2] = q[i].x / width;
-            now[i * 2 + 1] = q[i].y / height;
-        }
-        if (previousMarkerNormalized.length == 8) {
-            float sum = 0f;
-            for (int i = 0; i < 8; i++) sum += Math.abs(now[i] - previousMarkerNormalized[i]);
-            float motion = sum / 8f;
-            markerStableFrames = motion < 0.008f ? markerStableFrames + 1 : 0;
-        } else markerStableFrames = 0;
-        previousMarkerNormalized = now;
-        return markerStableFrames >= 2;
-    }
-
-    private float[] sourceCornersToView(Marker20mmDetector.Point[] q, ImageProxy image) {
+    /** Convert the four user-selected preview points to ImageProxy source coordinates. */
+    private Marker20mmDetector.Point[] viewCornersToSource(float[] corners, ImageProxy image) {
+        if (corners == null || corners.length != 8 || previewView.getWidth() <= 0 || previewView.getHeight() <= 0) return null;
         int sw = image.getWidth(), sh = image.getHeight();
         int rotation = ((image.getImageInfo().getRotationDegrees() % 360) + 360) % 360;
         int rw = (rotation == 90 || rotation == 270) ? sh : sw;
@@ -447,28 +447,44 @@ public class NativeCameraActivity extends ComponentActivity {
         float scale = Math.min(previewView.getWidth() / (float) rw, previewView.getHeight() / (float) rh);
         float ox = (previewView.getWidth() - rw * scale) / 2f;
         float oy = (previewView.getHeight() - rh * scale) / 2f;
-        float[] out = new float[8];
+        Marker20mmDetector.Point[] out = new Marker20mmDetector.Point[4];
+
         for (int i = 0; i < 4; i++) {
-            float rx, ry;
-            float sx = q[i].x, sy = q[i].y;
+            float rx = (corners[i * 2] - ox) / scale;
+            float ry = (corners[i * 2 + 1] - oy) / scale;
+            if (rx < 0f || ry < 0f || rx > rw - 1f || ry > rh - 1f) return null;
+            float sx, sy;
             switch (rotation) {
-                case 90: rx = sh - 1 - sy; ry = sx; break;
-                case 180: rx = sw - 1 - sx; ry = sh - 1 - sy; break;
-                case 270: rx = sy; ry = sw - 1 - sx; break;
-                default: rx = sx; ry = sy; break;
+                case 90:
+                    sx = ry;
+                    sy = sh - 1f - rx;
+                    break;
+                case 180:
+                    sx = sw - 1f - rx;
+                    sy = sh - 1f - ry;
+                    break;
+                case 270:
+                    sx = sw - 1f - ry;
+                    sy = rx;
+                    break;
+                default:
+                    sx = rx;
+                    sy = ry;
+                    break;
             }
-            out[i * 2] = ox + rx * scale;
-            out[i * 2 + 1] = oy + ry * scale;
+            if (sx < 0f || sy < 0f || sx > sw - 1f || sy > sh - 1f) return null;
+            out[i] = new Marker20mmDetector.Point(sx, sy);
         }
         return out;
     }
 
     private void resetMeasurement() {
-        stabilizerX.reset(); stabilizerY.reset();
-        markerStableFrames = 0; previousMarkerNormalized = new float[0];
+        stabilizerX.reset();
+        stabilizerY.reset();
         synchronized (measurementLock) {
-            lastX = lastY = lastConfidence = 0f; lastFullX = lastFullY = 0;
-            lastStable = false; markerDetected = false;
+            lastX = lastY = lastConfidence = 0f;
+            lastFullX = lastFullY = 0;
+            lastStable = false;
         }
         runOnUiThread(() -> {
             captureButton.setEnabled(false);
@@ -497,15 +513,15 @@ public class NativeCameraActivity extends ComponentActivity {
     }
 
     private void capturePhoto() {
-        if (imageCapture == null) return;
+        if (imageCapture == null || !roiLocked) return;
         synchronized (measurementLock) {
-            if (!markerDetected || !lastStable) {
-                Toast.makeText(this, "انتظر حتى تثبت قراءة Marker 20×20.", Toast.LENGTH_LONG).show();
+            if (!lastStable) {
+                Toast.makeText(this, "انتظر حتى تثبت القراءة داخل مربع 20×20 الذي حددته.", Toast.LENGTH_LONG).show();
                 return;
             }
         }
         captureButton.setEnabled(false);
-        File output = new File(getCacheDir(), "meshcheck-marker20-" + System.currentTimeMillis() + ".jpg");
+        File output = new File(getCacheDir(), "meshcheck-manual20-" + System.currentTimeMillis() + ".jpg");
         ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(output).build();
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
             @Override public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
@@ -515,7 +531,8 @@ public class NativeCameraActivity extends ComponentActivity {
                 result.putExtra(EXTRA_FIXED_DISTANCE_CM, 0f);
                 result.putExtra(EXTRA_FIXED_CALIBRATED, true);
                 result.putExtra(EXTRA_RULER_BASE_PX_1X, 0f);
-                result.putExtra(EXTRA_MARKER_MODE, true);
+                result.putExtra(EXTRA_MARKER_MODE, false);
+                result.putExtra(EXTRA_MANUAL_ROI_MODE, true);
                 synchronized (measurementLock) {
                     float primary = lastX > 0f && lastY > 0f ? (lastX + lastY) / 2f : Math.max(lastX, lastY);
                     result.putExtra(EXTRA_THREAD_COUNT_CM, primary);
@@ -527,7 +544,8 @@ public class NativeCameraActivity extends ComponentActivity {
                     result.putExtra(EXTRA_THREAD_COUNT_CONFIDENCE, lastConfidence);
                     result.putExtra(EXTRA_THREAD_COUNT_STABLE, lastStable);
                 }
-                setResult(RESULT_OK, result); finish();
+                setResult(RESULT_OK, result);
+                finish();
             }
             @Override public void onError(@NonNull ImageCaptureException exception) {
                 captureButton.setEnabled(true);
@@ -549,25 +567,44 @@ public class NativeCameraActivity extends ComponentActivity {
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
     private static float distance(Marker20mmDetector.Point a, Marker20mmDetector.Point b) {
         float dx = a.x - b.x, dy = a.y - b.y;
         return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
-    private static final class DetectorFrame {
-        final byte[] gray; final int width, height, step;
-        DetectorFrame(byte[] gray, int width, int height, int step) {
-            this.gray = gray; this.width = width; this.height = height; this.step = step;
+    private static boolean validQuad(float[] q) {
+        if (q == null || q.length != 8) return false;
+        float minEdge = 45f;
+        for (int i = 0; i < 4; i++) {
+            int j = (i + 1) % 4;
+            float dx = q[i * 2] - q[j * 2];
+            float dy = q[i * 2 + 1] - q[j * 2 + 1];
+            if (Math.sqrt(dx * dx + dy * dy) < minEdge) return false;
         }
+        float sign = 0f;
+        for (int i = 0; i < 4; i++) {
+            int a = i, b = (i + 1) % 4, c = (i + 2) % 4;
+            float abx = q[b * 2] - q[a * 2];
+            float aby = q[b * 2 + 1] - q[a * 2 + 1];
+            float bcx = q[c * 2] - q[b * 2];
+            float bcy = q[c * 2 + 1] - q[b * 2 + 1];
+            float cross = abx * bcy - aby * bcx;
+            if (Math.abs(cross) < 20f) return false;
+            if (sign == 0f) sign = Math.signum(cross);
+            else if (Math.signum(cross) != sign) return false;
+        }
+        return true;
     }
 
     private static final class DirectionMeasurement {
-        final boolean ok; final ThreadCountConsensus.FrameResult frame;
+        final boolean ok;
+        final ThreadCountConsensus.FrameResult frame;
         DirectionMeasurement(boolean ok, ThreadCountConsensus.FrameResult frame) { this.ok = ok; this.frame = frame; }
         static DirectionMeasurement fail() { return new DirectionMeasurement(false, null); }
     }
 
-    /** Homography from unit square to detected 20x20 marker quadrilateral. */
+    /** Homography from unit square to the four user-selected corners. */
     private static final class Homography {
         final double a11,a12,a13,a21,a22,a23,a31,a32;
         Homography(double a11,double a12,double a13,double a21,double a22,double a23,double a31,double a32) {
@@ -595,45 +632,204 @@ public class NativeCameraActivity extends ComponentActivity {
         }
     }
 
-    private static final class MarkerOverlay extends View {
-        private final Paint markerPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint stablePaint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint textPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint focusPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float[] corners=new float[0];
-        private float xDensity,yDensity;
-        private boolean stable;
-        private float markerConfidence;
-        private String message="";
-        private float focusX=-1,focusY=-1; private long focusTime;
+    private static final class ManualRoiOverlay extends View {
+        private final Paint editPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint lockedPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint focusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+        private final float handleRadius;
+        private final float[] corners = new float[8]; // TL, TR, BR, BL
+        private boolean initialized;
+        private boolean locked;
+        private int activeCorner = -1;
+        private boolean movingWhole;
+        private float lastTouchX, lastTouchY;
+        private float xDensity, yDensity;
+        private boolean measurementStable;
+        private float focusX=-1f, focusY=-1f;
+        private long focusTime;
 
-        MarkerOverlay(NativeCameraActivity c) {
-            super(c); setWillNotDraw(false);
-            float d=getResources().getDisplayMetrics().density;
-            markerPaint.setColor(0xFFFFD54F); markerPaint.setStyle(Paint.Style.STROKE); markerPaint.setStrokeWidth(3f*d);
-            stablePaint.setColor(0xFF67E8D1); stablePaint.setStyle(Paint.Style.STROKE); stablePaint.setStrokeWidth(4f*d);
-            textPaint.setColor(Color.WHITE); textPaint.setTextSize(13f*d); textPaint.setFakeBoldText(true);
-            focusPaint.setColor(0xFF67E8D1); focusPaint.setStyle(Paint.Style.STROKE); focusPaint.setStrokeWidth(2f*d);
+        ManualRoiOverlay(NativeCameraActivity context) {
+            super(context);
+            setWillNotDraw(false);
+            density = getResources().getDisplayMetrics().density;
+            handleRadius = 15f * density;
+            editPaint.setColor(0xFFFFD54F);
+            editPaint.setStyle(Paint.Style.STROKE);
+            editPaint.setStrokeWidth(3f * density);
+            lockedPaint.setColor(0xFF67E8D1);
+            lockedPaint.setStyle(Paint.Style.STROKE);
+            lockedPaint.setStrokeWidth(4f * density);
+            handlePaint.setColor(0xFFFFD54F);
+            handlePaint.setStyle(Paint.Style.FILL);
+            textPaint.setColor(Color.WHITE);
+            textPaint.setTextSize(12f * density);
+            textPaint.setFakeBoldText(true);
+            focusPaint.setColor(0xFF67E8D1);
+            focusPaint.setStyle(Paint.Style.STROKE);
+            focusPaint.setStrokeWidth(2f * density);
         }
-        void setMarker(float[] c,float confidence,boolean isStable){corners=c==null?new float[0]:c.clone();markerConfidence=confidence;stable=isStable;message="";invalidate();}
-        void clearMarker(String msg){corners=new float[0];stable=false;message=msg;invalidate();}
-        void setResults(float x,float y,boolean s){xDensity=x;yDensity=y;stable=s;invalidate();}
-        void showFocus(float x,float y){focusX=x;focusY=y;focusTime=System.currentTimeMillis();invalidate();}
-        @Override protected void onDraw(Canvas canvas){
-            super.onDraw(canvas);
-            if(corners.length==8){
-                Path p=new Path();p.moveTo(corners[0],corners[1]);p.lineTo(corners[2],corners[3]);p.lineTo(corners[4],corners[5]);p.lineTo(corners[6],corners[7]);p.close();
-                canvas.drawPath(p,stable?stablePaint:markerPaint);
-                for(int i=0;i<4;i++)canvas.drawCircle(corners[i*2],corners[i*2+1],8f,getResources().getDisplayMetrics().density>2?stable?stablePaint:markerPaint:markerPaint);
-                String t=String.format(Locale.US,"20×20 mm • %.0f%%",markerConfidence*100f);
-                canvas.drawText(t,corners[0],Math.max(30f,corners[1]-14f),textPaint);
-                if(xDensity>0f||yDensity>0f){
-                    String r=String.format(Locale.US,"X %.1f • Y %.1f n/cm",xDensity,yDensity);
-                    canvas.drawText(r,corners[6],Math.min(getHeight()-30f,corners[7]+28f),textPaint);
+
+        @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            if (!initialized && w > 0 && h > 0) {
+                initialized = true;
+                resetArea();
+            }
+        }
+
+        void resetArea() {
+            if (getWidth() <= 0 || getHeight() <= 0) return;
+            float side = Math.min(getWidth() * 0.52f, getHeight() * 0.30f);
+            float cx = getWidth() / 2f;
+            float cy = getHeight() * 0.49f;
+            corners[0] = cx - side/2f; corners[1] = cy - side/2f;
+            corners[2] = cx + side/2f; corners[3] = cy - side/2f;
+            corners[4] = cx + side/2f; corners[5] = cy + side/2f;
+            corners[6] = cx - side/2f; corners[7] = cy + side/2f;
+            locked = false;
+            xDensity = yDensity = 0f;
+            measurementStable = false;
+            invalidate();
+        }
+
+        void setLocked(boolean value) {
+            locked = value;
+            activeCorner = -1;
+            movingWhole = false;
+            invalidate();
+        }
+
+        float[] snapshotCorners() {
+            synchronized (corners) { return corners.clone(); }
+        }
+
+        void setResults(float x, float y, boolean stable) {
+            xDensity = x;
+            yDensity = y;
+            measurementStable = stable;
+            invalidate();
+        }
+
+        void showFocus(float x, float y) {
+            focusX=x; focusY=y; focusTime=System.currentTimeMillis(); invalidate();
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            if (locked) return false;
+            float x = event.getX(), y = event.getY();
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    activeCorner = nearestCorner(x, y);
+                    if (activeCorner >= 0) {
+                        lastTouchX = x; lastTouchY = y;
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                        return true;
+                    }
+                    if (pointInQuad(x, y)) {
+                        movingWhole = true;
+                        lastTouchX = x; lastTouchY = y;
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                        return true;
+                    }
+                    return false;
+                case MotionEvent.ACTION_MOVE:
+                    if (activeCorner >= 0) {
+                        synchronized (corners) {
+                            corners[activeCorner*2] = clamp(x, 8f*density, getWidth()-8f*density);
+                            corners[activeCorner*2+1] = clamp(y, 70f*density, getHeight()-150f*density);
+                        }
+                        invalidate();
+                        return true;
+                    }
+                    if (movingWhole) {
+                        float dx = x-lastTouchX, dy = y-lastTouchY;
+                        translateWhole(dx, dy);
+                        lastTouchX=x; lastTouchY=y;
+                        invalidate();
+                        return true;
+                    }
+                    return false;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    boolean consumed = activeCorner >= 0 || movingWhole;
+                    activeCorner = -1;
+                    movingWhole = false;
+                    getParent().requestDisallowInterceptTouchEvent(false);
+                    return consumed;
+                default:
+                    return false;
+            }
+        }
+
+        private int nearestCorner(float x, float y) {
+            int best=-1;
+            float bestD=handleRadius*2.2f;
+            synchronized (corners) {
+                for (int i=0;i<4;i++) {
+                    float dx=x-corners[i*2], dy=y-corners[i*2+1];
+                    float d=(float)Math.sqrt(dx*dx+dy*dy);
+                    if (d<bestD) { bestD=d; best=i; }
                 }
             }
-            if(!message.isEmpty())canvas.drawText(message,24f,getHeight()/2f,textPaint);
-            if(focusX>=0&&System.currentTimeMillis()-focusTime<1200){canvas.drawCircle(focusX,focusY,28f,focusPaint);postInvalidateOnAnimation();}
+            return best;
+        }
+
+        private boolean pointInQuad(float x, float y) {
+            float[] q=snapshotCorners();
+            boolean inside=false;
+            for(int i=0,j=3;i<4;j=i++) {
+                float xi=q[i*2], yi=q[i*2+1], xj=q[j*2], yj=q[j*2+1];
+                boolean intersect=((yi>y)!=(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi+0.0001f)+xi);
+                if(intersect) inside=!inside;
+            }
+            return inside;
+        }
+
+        private void translateWhole(float dx, float dy) {
+            synchronized (corners) {
+                float minX=Float.MAX_VALUE,maxX=-Float.MAX_VALUE,minY=Float.MAX_VALUE,maxY=-Float.MAX_VALUE;
+                for(int i=0;i<4;i++){minX=Math.min(minX,corners[i*2]);maxX=Math.max(maxX,corners[i*2]);minY=Math.min(minY,corners[i*2+1]);maxY=Math.max(maxY,corners[i*2+1]);}
+                if(minX+dx<8f*density) dx=8f*density-minX;
+                if(maxX+dx>getWidth()-8f*density) dx=getWidth()-8f*density-maxX;
+                if(minY+dy<70f*density) dy=70f*density-minY;
+                if(maxY+dy>getHeight()-150f*density) dy=getHeight()-150f*density-maxY;
+                for(int i=0;i<4;i++){corners[i*2]+=dx;corners[i*2+1]+=dy;}
+            }
+        }
+
+        private static float clamp(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float[] q=snapshotCorners();
+            Paint border = locked ? lockedPaint : editPaint;
+            Path p=new Path();
+            p.moveTo(q[0],q[1]); p.lineTo(q[2],q[3]); p.lineTo(q[4],q[5]); p.lineTo(q[6],q[7]); p.close();
+            canvas.drawPath(p,border);
+
+            if (!locked) {
+                String[] labels={"1","2","3","4"};
+                for(int i=0;i<4;i++){
+                    canvas.drawCircle(q[i*2],q[i*2+1],handleRadius,handlePaint);
+                    float tw=textPaint.measureText(labels[i]);
+                    canvas.drawText(labels[i],q[i*2]-tw/2f,q[i*2+1]+5f*density,textPaint);
+                }
+                canvas.drawText("اسحب الزوايا الداخلية للمربع 20×20", Math.max(12f,q[0]), Math.max(85f,q[1]-18f*density), textPaint);
+            } else {
+                String title="20×20 mm MANUAL ROI — لا يوجد اكتشاف تلقائي";
+                canvas.drawText(title,Math.max(12f,q[0]),Math.max(85f,q[1]-15f*density),textPaint);
+                if(xDensity>0f||yDensity>0f){
+                    String r=String.format(Locale.US,"X %.1f • Y %.1f n/cm • %s",xDensity,yDensity,measurementStable?"STABLE":"MEASURING");
+                    canvas.drawText(r,Math.max(12f,q[6]),Math.min(getHeight()-155f,q[7]+28f*density),textPaint);
+                }
+            }
+
+            if(focusX>=0&&System.currentTimeMillis()-focusTime<1200){
+                canvas.drawCircle(focusX,focusY,28f*density,focusPaint);
+                postInvalidateOnAnimation();
+            }
         }
     }
 }
