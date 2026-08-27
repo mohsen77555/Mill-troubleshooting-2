@@ -28,7 +28,13 @@
     const counts = measuredCounts(native);
     const average = counts.reduce((a, b) => a + b, 0) / Math.max(1, counts.length);
     const warnings = original && Array.isArray(original.warnings) ? original.warnings.slice() : [];
-    if (native.source === "marker_20x20_mm") {
+    if (native.source === "manual_20x20_mm_roi") {
+      warnings.push(
+        "Thread count measured only inside the user-defined physical 20×20 mm square: X=" +
+        Number(native.threadsXPerCm || 0).toFixed(1) + "/cm, Y=" +
+        Number(native.threadsYPerCm || 0).toFixed(1) + "/cm. No automatic marker detection was used."
+      );
+    } else if (native.source === "marker_20x20_mm") {
       warnings.push(
         "Thread count measured from the physical 20×20 mm marker: X=" +
         Number(native.threadsXPerCm || 0).toFixed(1) + "/cm, Y=" +
