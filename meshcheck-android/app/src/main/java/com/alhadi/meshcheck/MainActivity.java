@@ -157,6 +157,7 @@ public class MainActivity extends Activity {
             float confidence = captureData.getFloatExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_CONFIDENCE, 0f);
             boolean stable = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_STABLE, false);
             boolean markerMode = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_MARKER_MODE, false);
+            boolean manualRoiMode = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_MANUAL_ROI_MODE, false);
             float zoomRatio = captureData.getFloatExtra(NativeCameraActivity.EXTRA_ZOOM_RATIO, 1f);
 
             JSONArray counts = new JSONArray();
@@ -165,7 +166,7 @@ public class MainActivity extends Activity {
 
             JSONObject measurement = new JSONObject();
             measurement.put("valid", stable && threadCountCm > 0f);
-            measurement.put("source", markerMode ? "marker_20x20_mm" : "native_camera");
+            measurement.put("source", manualRoiMode ? "manual_20x20_mm_roi" : (markerMode ? "marker_20x20_mm" : "native_camera"));
             measurement.put("threadsPerCm", threadCountCm);
             measurement.put("threadsPerInch", threadCountCm * 2.54f);
             measurement.put("threadCountsPerCm", counts);
@@ -174,7 +175,7 @@ public class MainActivity extends Activity {
             measurement.put("fullLinesInWindow", fullLineCount);
             measurement.put("fullLinesXIn20mm", fullX);
             measurement.put("fullLinesYIn20mm", fullY);
-            measurement.put("physicalWindowMm", markerMode ? 20 : 10);
+            measurement.put("physicalWindowMm", (manualRoiMode || markerMode) ? 20 : 10);
             measurement.put("confidence", confidence);
             measurement.put("stable", stable);
             measurement.put("zoomRatio", zoomRatio);
