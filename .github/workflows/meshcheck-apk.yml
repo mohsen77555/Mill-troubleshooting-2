@@ -42,7 +42,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Test 20 mm marker and thread measurement
+      - name: Test 20 mm physical-window thread measurement
         run: |
           mkdir -p build/thread-counter-test
           javac -d build/thread-counter-test \
@@ -51,11 +51,9 @@ jobs:
             app/src/main/java/com/alhadi/meshcheck/Marker20mmDetector.java \
             tests/ThreadProfileCounterTest.java \
             tests/ThreadCountConsensusTest.java \
-            tests/Marker20mmDetectorTest.java \
             tests/Physical20mmWindowTest.java
           java -cp build/thread-counter-test ThreadProfileCounterTest
           java -cp build/thread-counter-test ThreadCountConsensusTest
-          java -cp build/thread-counter-test Marker20mmDetectorTest
           java -cp build/thread-counter-test Physical20mmWindowTest
 
       - name: Set up Gradle
@@ -77,11 +75,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.14.0-marker20mm-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.15.0-manual20mm-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.14.0-marker20mm-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.14.0-marker20mm-debug.apk
+          name: MeshCheck-Sefar-v0.15.0-manual20mm-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.15.0-manual20mm-debug.apk
           if-no-files-found: error
