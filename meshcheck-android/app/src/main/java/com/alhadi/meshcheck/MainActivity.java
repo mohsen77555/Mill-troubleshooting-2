@@ -160,13 +160,37 @@ public class MainActivity extends Activity {
             boolean manualRoiMode = captureData.getBooleanExtra(NativeCameraActivity.EXTRA_MANUAL_ROI_MODE, false);
             float zoomRatio = captureData.getFloatExtra(NativeCameraActivity.EXTRA_ZOOM_RATIO, 1f);
 
+            float pitchX = captureData.getFloatExtra(NativeCameraActivity.EXTRA_PITCH_X_UM, 0f);
+            float pitchY = captureData.getFloatExtra(NativeCameraActivity.EXTRA_PITCH_Y_UM, 0f);
+            float yarnX = captureData.getFloatExtra(NativeCameraActivity.EXTRA_YARN_X_UM, 0f);
+            float yarnY = captureData.getFloatExtra(NativeCameraActivity.EXTRA_YARN_Y_UM, 0f);
+            float openingX = captureData.getFloatExtra(NativeCameraActivity.EXTRA_OPENING_X_UM, 0f);
+            float openingY = captureData.getFloatExtra(NativeCameraActivity.EXTRA_OPENING_Y_UM, 0f);
+            float uncertaintyX = captureData.getFloatExtra(NativeCameraActivity.EXTRA_UNCERTAINTY_X_UM, 0f);
+            float uncertaintyY = captureData.getFloatExtra(NativeCameraActivity.EXTRA_UNCERTAINTY_Y_UM, 0f);
+            float quality = captureData.getFloatExtra(NativeCameraActivity.EXTRA_QUALITY_SCORE, 0f);
+            float sharpness = captureData.getFloatExtra(NativeCameraActivity.EXTRA_SHARPNESS_SCORE, 0f);
+            float burstSharpness = captureData.getFloatExtra(NativeCameraActivity.EXTRA_BURST_SHARPNESS, 0f);
+
             JSONArray counts = new JSONArray();
             if (xCount > 0f) counts.put(xCount);
             if (yCount > 0f) counts.put(yCount);
+            JSONArray pitches = positiveArray(pitchX, pitchY);
+            JSONArray yarns = positiveArray(yarnX, yarnY);
+            JSONArray openings = positiveArray(openingX, openingY);
+            JSONArray uncertainties = positiveArray(uncertaintyX, uncertaintyY);
+
+            float averagePitch = averagePositive(pitchX, pitchY);
+            float averageYarn = averagePositive(yarnX, yarnY);
+            float averageOpening = averagePositive(openingX, openingY);
+            float averageUncertainty = averagePositive(uncertaintyX, uncertaintyY);
 
             JSONObject measurement = new JSONObject();
             measurement.put("valid", stable && threadCountCm > 0f);
-            measurement.put("source", manualRoiMode ? "manual_20x20_mm_roi" : (markerMode ? "marker_20x20_mm" : "native_camera"));
+            String source = manualRoiMode && averageOpening > 0f
+                    ? "lens_crop_20x20_high_accuracy"
+                    : (manualRoiMode ? "manual_20x20_mm_roi" : (markerMode ? "marker_20x20_mm" : "native_camera"));
+            measurement.put("source", source);
             measurement.put("threadsPerCm", threadCountCm);
             measurement.put("threadsPerInch", threadCountCm * 2.54f);
             measurement.put("threadCountsPerCm", counts);
@@ -180,6 +204,24 @@ public class MainActivity extends Activity {
             measurement.put("stable", stable);
             measurement.put("zoomRatio", zoomRatio);
 
+            measurement.put("pitchMicrons", averagePitch);
+            measurement.put("pitchMicronsXY", pitches);
+            measurement.put("pitchXMicrons", pitchX);
+            measurement.put("pitchYMicrons", pitchY);
+            measurement.put("yarnMicrons", averageYarn);
+            measurement.put("yarnMicronsXY", yarns);
+            measurement.put("yarnXMicrons", yarnX);
+            measurement.put("yarnYMicrons", yarnY);
+            measurement.put("openingMicrons", averageOpening);
+            measurement.put("openingMicronsXY", openings);
+            measurement.put("openingXMicrons", openingX);
+            measurement.put("openingYMicrons", openingY);
+            measurement.put("uncertaintyMicrons", averageUncertainty);
+            measurement.put("uncertaintyMicronsXY", uncertainties);
+            measurement.put("quality", quality);
+            measurement.put("sharpness", sharpness);
+            measurement.put("burstSharpness", burstSharpness);
+
             String script = "window.MeshCheckNativeMeasurement=" + measurement.toString() + ";"
                     + "window.MeshCheckNativeMeasurementPending=true;"
                     + "window.MeshCheckNativeCameraResult && window.MeshCheckNativeCameraResult("
@@ -188,6 +230,18 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, "تعذر قراءة نتيجة الكاميرا: " + e.getMessage(), Toast.LENGTH_LONG).show();
         } finally { file.delete(); }
+    }
+
+    private static JSONArray positiveArray(float a, float b) {
+        JSONArray array = new JSONArray();
+        if (a > 0f) array.put(a);
+        if (b > 0f) array.put(b);
+        return array;
+    }
+
+    private static float averagePositive(float a, float b) {
+        if (a > 0f && b > 0f) return (a + b) * 0.5f;
+        return Math.max(a, b);
     }
 
     @Override public void onBackPressed() { if (webView != null && webView.canGoBack()) webView.goBack(); else super.onBackPressed(); }
