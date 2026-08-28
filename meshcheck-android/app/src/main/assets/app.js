@@ -16,8 +16,11 @@
   const codeMetric = document.getElementById("codeMetric");
   const materialMetric = document.getElementById("materialMetric");
   const openingMetric = document.getElementById("openingMetric");
+  const yarnMetric = document.getElementById("yarnMetric");
   const pitchMetric = document.getElementById("pitchMetric");
   const threadMetric = document.getElementById("threadMetric");
+  const uncertaintyMetric = document.getElementById("uncertaintyMetric");
+  const measurementQualityMetric = document.getElementById("measurementQualityMetric");
   const confidenceMetric = document.getElementById("confidenceMetric");
   const resultSummary = document.getElementById("resultSummary");
   const warnings = document.getElementById("warnings");
@@ -45,7 +48,7 @@
   const storedScale = Number(localStorage.getItem("meshcheck.micronsPerPixel"));
   if (storedScale > 0) {
     micronsPerPixel.value = formatNumber(storedScale, 5);
-    calibrationStatus.textContent = "تمت استعادة قيمة معايرة محفوظة. تحقق منها قبل كل فحص.";
+    calibrationStatus.textContent = "تمت استعادة قيمة معايرة يدوية محفوظة. استخدمها فقط للمسار الاحتياطي.";
   }
 
   picker.addEventListener("change", loadImage);
@@ -60,7 +63,7 @@
 
   function formatNumber(value, maximumFractionDigits) {
     if (!Number.isFinite(Number(value))) return "—";
-    return new Intl.NumberFormat("en-US", { maximumFractionDigits: maximumFractionDigits, minimumFractionDigits: 0 }).format(value);
+    return new Intl.NumberFormat("en-US", { maximumFractionDigits, minimumFractionDigits: 0 }).format(value);
   }
 
   function setStatus(text) {
@@ -89,8 +92,8 @@
         canvasWrap.classList.remove("empty");
         placeholder.hidden = true;
         imageInfo.textContent = "الصورة: " + sourceName + " - " + canvas.width + " × " + canvas.height + " بكسل.";
-        autoStatus.textContent = "جاهزة. اضغط «تحليل تلقائي ومطابقة Sefar».";
-        calibrationStatus.textContent = "يمكنك المعايرة اليدوية فقط إذا لم تكن المسطرة ظاهرة أو كانت الثقة منخفضة.";
+        autoStatus.textContent = "جاهزة. اضغط «تحليل الصورة ومطابقة Sefar».";
+        calibrationStatus.textContent = "المعايرة اليدوية احتياطية فقط للصور خارج مسار عدسة 20×20 mm.";
         setStatus("تم تحميل الصورة");
         resetResultCards();
         render();
@@ -135,7 +138,7 @@
         setStatus("تعذر التحليل");
       } finally {
         autoAnalyzeButton.disabled = false;
-        autoAnalyzeButton.textContent = "تحليل تلقائي ومطابقة Sefar";
+        autoAnalyzeButton.textContent = "تحليل الصورة ومطابقة Sefar";
       }
     }, 30);
   }
@@ -147,7 +150,8 @@
     }
     currentCandidates = SefarCatalog.matchCandidates({
       pitchMicrons: automaticResult.pitchMicrons,
-      openingMicrons: automaticResult.openingMicrons
+      openingMicrons: automaticResult.openingMicrons,
+      yarnMicrons: automaticResult.yarnMicrons
     }, materialFilter.value).slice(0, 3);
   }
 
@@ -165,27 +169,45 @@
       resultSummary.textContent = "تم القياس، لكن لا توجد مطابقة ضمن جدول القماش المحدد.";
       return;
     }
-    const detectedOpening = automaticResult.openingMicrons;
-    const confidence = Math.min(99, Math.round(automaticResult.confidence * 100 * 0.75 + best.confidence * 0.25));
+
+    const detectedOpening = Number(automaticResult.openingMicrons) || 0;
+    const detectedYarn = Number(automaticResult.yarnMicrons) || 0;
+    const uncertainty = Number(automaticResult.uncertaintyMicrons) || 0;
+    const measurementQuality = Number(automaticResult.measurementQuality) || 0;
+    const confidence = Math.min(99, Math.round(automaticResult.confidence * 100 * 0.72 + best.confidence * 0.28));
     const isAutoMaterial = materialFilter.value === "Auto";
+
     codeMetric.textContent = best.code;
-    materialMetric.textContent = SefarCatalog.materialArabic(best.material) + " - مطابقة هندسية " + best.confidence + "%";
-    openingMetric.textContent = formatNumber(best.openingMicrons, 0) + " µm";
-    pitchMetric.textContent = formatNumber(automaticResult.pitchMicrons, 0) + " µm";
-    threadMetric.textContent = formatNumber(automaticResult.threadsPerCm, 1) + "/cm  |  " + formatNumber(automaticResult.threadsPerInch, 1) + "/in";
+    materialMetric.textContent = SefarCatalog.materialArabic(best.material) + " - مطابقة متعددة المعايير " + best.confidence + "%";
+    openingMetric.textContent = detectedOpening > 0
+      ? formatNumber(detectedOpening, 0) + " µm"
+      : formatNumber(best.openingMicrons, 0) + " µm (catalog)";
+    yarnMetric.textContent = detectedYarn > 0 ? formatNumber(detectedYarn, 0) + " µm" : "—";
+    pitchMetric.textContent = formatNumber(automaticResult.pitchMicrons, 1) + " µm";
+    threadMetric.textContent = formatNumber(automaticResult.threadsPerCm, 2) + "/cm  |  " + formatNumber(automaticResult.threadsPerInch, 2) + "/in";
+    uncertaintyMetric.textContent = uncertainty > 0 ? "±" + formatNumber(uncertainty, 0) + " µm" : "—";
+    measurementQualityMetric.textContent = measurementQuality > 0 ? Math.round(measurementQuality * 100) + "%" : "—";
     confidenceMetric.textContent = confidence + "%";
-    const quality = confidence >= 75 ? "good" : confidence >= 55 ? "warn" : "neutral";
-    qualityLabel.textContent = confidence >= 75 ? "ثقة جيدة" : confidence >= 55 ? "قراءة إرشادية" : "تحقق يدوي مطلوب";
-    qualityLabel.className = "quality " + quality;
-    const openingText = detectedOpening ? "الفتحة المقاسة من الصورة " + formatNumber(detectedOpening, 0) + " µm؛ " : "لم تُقَس الفتحة مباشرة بسبب الإضاءة/الأوساخ؛ ";
-    resultSummary.textContent = openingText + "الـPitch المقاس " + formatNumber(automaticResult.pitchMicrons, 0) + " µm، وأقرب كود هو " + best.code + " (فتحة Sefar " + best.openingMicrons + " µm).";
+
+    const qualityScore = measurementQuality > 0 ? measurementQuality * 100 : confidence;
+    const qualityClass = qualityScore >= 78 ? "good" : qualityScore >= 58 ? "warn" : "neutral";
+    qualityLabel.textContent = qualityScore >= 78 ? "High Accuracy" : qualityScore >= 58 ? "جودة مقبولة" : "تحقق مطلوب";
+    qualityLabel.className = "quality " + qualityClass;
+
+    const measuredText = detectedOpening > 0
+      ? "Opening " + formatNumber(detectedOpening, 0) + " µm، Yarn " + formatNumber(detectedYarn, 0) + " µm، Pitch " + formatNumber(automaticResult.pitchMicrons, 1) + " µm"
+      : "Pitch " + formatNumber(automaticResult.pitchMicrons, 1) + " µm";
+    const uncertaintyText = uncertainty > 0 ? "، uncertainty ±" + formatNumber(uncertainty, 0) + " µm" : "";
+    resultSummary.textContent = measuredText + uncertaintyText + ". أقرب مواصفة من ملف Sefar هي " + best.code + " بفتحة catalog " + best.openingMicrons + " µm.";
+
     const warningsToShow = automaticResult.warnings.slice();
-    if (isAutoMaterial) warningsToShow.push("للتأكيد النهائي اختر نوع القماش: PA أو PET أو Metal؛ الصورة وحدها لا تثبت المادة دائمًا.");
+    if (measurementQuality > 0 && measurementQuality < 0.65) warningsToShow.push("Quality أقل من 65%؛ أعد التصوير للحصول على نتيجة أقوى قبل الاعتماد على الكود.");
+    if (isAutoMaterial) warningsToShow.push("اختر المادة PA أو PET أو Metal إذا كانت معروفة؛ الصورة وحدها لا تثبت نوع البوليمر دائمًا.");
     renderWarnings(warningsToShow);
     renderCandidates();
     copyReport.disabled = false;
     exportCsv.disabled = false;
-    autoStatus.textContent = "تمت قراءة " + formatNumber(automaticResult.threadsPerInch, 1) + " خيط/إنش ومطابقتها مع Sefar.";
+    autoStatus.textContent = "تم القياس عالي الدقة والمطابقة باستخدام n/cm + Opening + Yarn عندما تكون متاحة.";
   }
 
   function renderWarnings(items) {
@@ -211,7 +233,8 @@
     currentCandidates.forEach(function (candidate, index) {
       const item = document.createElement("div");
       item.className = "candidate" + (index === 0 ? " selected" : "");
-      item.innerHTML = "<strong>" + escapeHtml(candidate.code) + "</strong><span>" + escapeHtml(SefarCatalog.materialArabic(candidate.material)) + "</span><small>فتحة " + candidate.openingMicrons + " µm - خيط " + candidate.yarnMicrons + " µm - " + candidate.confidence + "%</small>";
+      const yarnText = typeof candidate.yarnMicrons === "number" ? candidate.yarnMicrons + " µm" : String(candidate.yarnMicrons || "—") + " µm";
+      item.innerHTML = "<strong>" + escapeHtml(candidate.code) + "</strong><span>" + escapeHtml(SefarCatalog.materialArabic(candidate.material)) + "</span><small>Catalog: فتحة " + candidate.openingMicrons + " µm - خيط " + escapeHtml(yarnText) + " - " + candidate.confidence + "%</small>";
       candidateList.appendChild(item);
     });
     candidateBox.hidden = false;
@@ -224,7 +247,7 @@
     }
     calibrationMode = true;
     calibrationPoints = [];
-    calibrationStatus.textContent = "اضغط نقطتين تمثلان طولًا معروفًا على المسطرة أو مرجع المعايرة.";
+    calibrationStatus.textContent = "اضغط نقطتين تمثلان طولًا معروفًا على مرجع القياس.";
     setStatus("اختر نقطتين");
     render();
   }
@@ -234,7 +257,7 @@
     const bounds = canvas.getBoundingClientRect();
     const x = clamp(Math.round((event.clientX - bounds.left) * canvas.width / bounds.width), 0, canvas.width - 1);
     const y = clamp(Math.round((event.clientY - bounds.top) * canvas.height / bounds.height), 0, canvas.height - 1);
-    calibrationPoints.push({ x: x, y: y });
+    calibrationPoints.push({ x, y });
     calibrationStatus.textContent = calibrationPoints.length === 1 ? "تم اختيار النقطة الأولى؛ اختر النقطة الثانية." : "تم اختيار النقطتين؛ اضغط «اعتماد المعايرة».";
     render();
   }
@@ -254,7 +277,7 @@
     micronsPerPixel.value = formatNumber(scale, 5);
     localStorage.setItem("meshcheck.micronsPerPixel", String(scale));
     calibrationMode = false;
-    calibrationStatus.textContent = "تمت المعايرة: " + formatNumber(scale, 5) + " µm/بكسل.";
+    calibrationStatus.textContent = "تمت المعايرة اليدوية: " + formatNumber(scale, 5) + " µm/بكسل.";
     setStatus("تمت المعايرة");
     render();
   }
@@ -296,13 +319,16 @@
     codeMetric.textContent = "قياس يدوي";
     materialMetric.textContent = "لم تتم مطابقة كود Sefar تلقائيًا في الوضع اليدوي.";
     openingMetric.textContent = formatNumber(stats.mean, 0) + " µm";
+    yarnMetric.textContent = "—";
     pitchMetric.textContent = "—";
     threadMetric.textContent = formatNumber(stats.count, 0) + " فتحة مكتشفة";
+    uncertaintyMetric.textContent = "—";
+    measurementQualityMetric.textContent = "—";
     confidenceMetric.textContent = "تحقق مرجعي";
     qualityLabel.textContent = "قياس يدوي";
     qualityLabel.className = "quality neutral";
     resultSummary.textContent = "متوسط الفتحة " + formatNumber(stats.mean, 1) + " µm؛ المجال " + formatNumber(stats.min, 1) + " إلى " + formatNumber(stats.max, 1) + " µm.";
-    renderWarnings(["القياس اليدوي لا يحدد مادة القماش أو كود Sefar وحده؛ استخدم وضع التحليل التلقائي مع المسطرة الظاهرة للتطابق."]);
+    renderWarnings(["القياس اليدوي احتياطي ولا يحدد مادة القماش أو كود Sefar وحده."]);
     candidateBox.hidden = true;
     copyReport.disabled = false;
     exportCsv.disabled = false;
@@ -342,8 +368,11 @@
     codeMetric.textContent = "—";
     materialMetric.textContent = "—";
     openingMetric.textContent = "—";
+    yarnMetric.textContent = "—";
     pitchMetric.textContent = "—";
     threadMetric.textContent = "—";
+    uncertaintyMetric.textContent = "—";
+    measurementQualityMetric.textContent = "—";
     confidenceMetric.textContent = "—";
     qualityLabel.textContent = "لا توجد نتيجة";
     qualityLabel.className = "quality neutral";
@@ -357,27 +386,29 @@
   }
 
   function buildReport() {
-    const lines = ["MeshCheck Sefar - تقرير فحص المنخل", "الصورة: " + sourceName];
+    const lines = ["MeshCheck Sefar v0.18 - High Accuracy Report", "الصورة: " + sourceName];
     if (automaticResult && automaticResult.ok) {
       const best = currentCandidates[0];
-      lines.push("المعايرة التلقائية: " + formatNumber(automaticResult.micronsPerPixel, 4) + " µm/px");
-      lines.push("Pitch المقاس: " + formatNumber(automaticResult.pitchMicrons, 1) + " µm");
-      lines.push("عدد الخيوط: " + formatNumber(automaticResult.threadsPerCm, 2) + "/cm | " + formatNumber(automaticResult.threadsPerInch, 2) + "/inch");
-      lines.push("الفتحة المكتشفة: " + (automaticResult.openingMicrons ? formatNumber(automaticResult.openingMicrons, 1) + " µm" : "غير مؤكدة"));
+      lines.push("Pitch: " + formatNumber(automaticResult.pitchMicrons, 2) + " µm");
+      lines.push("Threads: " + formatNumber(automaticResult.threadsPerCm, 3) + "/cm | " + formatNumber(automaticResult.threadsPerInch, 3) + "/inch");
+      lines.push("Opening measured: " + (automaticResult.openingMicrons ? formatNumber(automaticResult.openingMicrons, 1) + " µm" : "N/A"));
+      lines.push("Yarn measured: " + (automaticResult.yarnMicrons ? formatNumber(automaticResult.yarnMicrons, 1) + " µm" : "N/A"));
+      lines.push("Uncertainty: " + (automaticResult.uncertaintyMicrons ? "±" + formatNumber(automaticResult.uncertaintyMicrons, 1) + " µm" : "N/A"));
+      lines.push("Measurement quality: " + (automaticResult.measurementQuality ? Math.round(automaticResult.measurementQuality * 100) + "%" : "N/A"));
       if (best) {
-        lines.push("أقرب كود Sefar: " + best.code + " (" + SefarCatalog.materialArabic(best.material) + ")");
-        lines.push("مواصفة Sefar: فتحة " + best.openingMicrons + " µm، خيط/سلك " + best.yarnMicrons + " µm، " + best.threadsPerInch + "/inch");
+        lines.push("Closest Sefar: " + best.code + " (" + SefarCatalog.materialArabic(best.material) + ")");
+        lines.push("Sefar catalog: opening " + best.openingMicrons + " µm, yarn/wire " + best.yarnMicrons + " µm, " + best.threadsPerInch + "/inch");
       }
-      lines.push("ثقة الصورة: " + Math.round(automaticResult.confidence * 100) + "%");
-      automaticResult.warnings.forEach(function (warning) { lines.push("تنبيه: " + warning); });
+      lines.push("Image confidence: " + Math.round(automaticResult.confidence * 100) + "%");
+      automaticResult.warnings.forEach(function (warning) { lines.push("Warning: " + warning); });
     } else if (manualResult) {
       const stats = manualResult.stats;
-      lines.push("معايرة يدوية: " + formatNumber(Number(micronsPerPixel.value), 5) + " µm/px");
-      lines.push("عدد الفتحات: " + stats.count);
-      lines.push("متوسط الفتحة: " + formatNumber(stats.mean, 1) + " µm");
-      lines.push("المدى: " + formatNumber(stats.min, 1) + " إلى " + formatNumber(stats.max, 1) + " µm");
+      lines.push("Manual calibration: " + formatNumber(Number(micronsPerPixel.value), 5) + " µm/px");
+      lines.push("Openings: " + stats.count);
+      lines.push("Mean opening: " + formatNumber(stats.mean, 1) + " µm");
+      lines.push("Range: " + formatNumber(stats.min, 1) + " to " + formatNumber(stats.max, 1) + " µm");
     }
-    lines.push("تنبيه: النتيجة أداة فحص داخلية وتحتاج تحققًا مرجعيًا قبل الشراء أو التشغيل.");
+    lines.push("Note: validate against known reference samples before production purchasing decisions.");
     return lines.join("\n");
   }
 
@@ -403,12 +434,15 @@
 
   function saveCsv() {
     if (!automaticResult && !manualResult) return;
-    const header = ["source", "mode", "sefar_code", "material", "opening_um", "pitch_um", "threads_per_cm", "threads_per_in", "confidence_percent"];
+    const header = ["source", "mode", "sefar_code", "material", "opening_um", "yarn_um", "pitch_um", "uncertainty_um", "threads_per_cm", "threads_per_in", "measurement_quality_percent", "confidence_percent"];
     const best = currentCandidates[0];
     const data = automaticResult && automaticResult.ok ? [
       sourceName, "auto", best ? best.code : "", best ? best.material : "",
-      automaticResult.openingMicrons || "", automaticResult.pitchMicrons || "", automaticResult.threadsPerCm || "", automaticResult.threadsPerInch || "", Math.round(automaticResult.confidence * 100)
-    ] : [sourceName, "manual", "", "", manualResult.stats.mean || "", "", "", "", ""];
+      automaticResult.openingMicrons || "", automaticResult.yarnMicrons || "", automaticResult.pitchMicrons || "",
+      automaticResult.uncertaintyMicrons || "", automaticResult.threadsPerCm || "", automaticResult.threadsPerInch || "",
+      automaticResult.measurementQuality ? Math.round(automaticResult.measurementQuality * 100) : "",
+      Math.round(automaticResult.confidence * 100)
+    ] : [sourceName, "manual", "", "", manualResult.stats.mean || "", "", "", "", "", "", "", ""];
     const csv = "\uFEFF" + header.join(",") + "\n" + data.map(csvValue).join(",") + "\n";
     const fileName = "meshcheck_sefar_" + new Date().toISOString().slice(0, 10) + ".csv";
     if (window.MeshExport && typeof window.MeshExport.saveCsv === "function") {
