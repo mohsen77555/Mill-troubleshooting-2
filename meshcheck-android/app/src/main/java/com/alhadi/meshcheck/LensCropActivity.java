@@ -8,6 +8,8 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -29,9 +31,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * High-accuracy post-capture crop for a physical 20 x 20 mm lens/opening.
- * The four handles are placed on the INNER corners of the known 20 mm opening.
- * The selected quadrilateral is perspective-rectified before thread counting.
+ * v0.18 high-accuracy post-capture metrology for a physical 20 x 20 mm opening.
+ * User places four crop handles on the INNER corners. Image is perspective-rectified,
+ * then 25 scans/direction are measured with FFT + sub-pixel autocorrelation and edge fitting.
  */
 public class LensCropActivity extends ComponentActivity {
     public static final String EXTRA_INPUT_PATH = "meshcheck.crop.input_path";
@@ -41,6 +43,7 @@ public class LensCropActivity extends ComponentActivity {
     private static final float PHYSICAL_SIDE_CM = 2.0f;
     private static final float ANALYSIS_INSET = 0.02f;
     private static final float ANALYSIS_LENGTH_CM = PHYSICAL_SIDE_CM * (1f - 2f * ANALYSIS_INSET);
+    private static final float MIN_QUALITY = 0.52f;
 
     private CropView cropView;
     private TextView statusLabel;
@@ -81,7 +84,7 @@ public class LensCropActivity extends ComponentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView guide = new TextView(this);
-        guide.setText("CROP 20×20 mm: ضع النقاط الأربع على الزوايا الداخلية لفتحة العدسة فقط");
+        guide.setText("CROP 20×20 mm • ضع النقاط على الزوايا الداخلية فقط • يظهر مكبّر عند تحريك الزاوية");
         guide.setTextColor(Color.WHITE);
         guide.setTextSize(13f);
         guide.setGravity(Gravity.CENTER);
@@ -99,7 +102,7 @@ public class LensCropActivity extends ComponentActivity {
         bottom.setBackgroundColor(0xD10A1115);
 
         statusLabel = new TextView(this);
-        statusLabel.setText("حرّك الزوايا بدقة. سيتم تصحيح الميل Perspective تلقائيًا بعد القص.");
+        statusLabel.setText("حرّك الزوايا بدقة. التحليل النهائي يستخدم الصورة الأصلية عالية الدقة.");
         statusLabel.setTextColor(Color.WHITE);
         statusLabel.setTextSize(12f);
         statusLabel.setGravity(Gravity.CENTER);
@@ -115,12 +118,12 @@ public class LensCropActivity extends ComponentActivity {
         reset.setTextSize(10f);
         reset.setOnClickListener(v -> {
             cropView.resetCrop();
-            statusLabel.setText("حرّك الزوايا إلى الحافة الداخلية لفتحة 20×20 mm.");
+            statusLabel.setText("ضع كل زاوية على الحافة الداخلية الدقيقة لفتحة 20×20 mm.");
         });
 
         analyzeButton = new Button(this);
-        analyzeButton.setText("قص + تحليل");
-        analyzeButton.setTextSize(11f);
+        analyzeButton.setText("قص + تحليل دقيق");
+        analyzeButton.setTextSize(10f);
         analyzeButton.setOnClickListener(v -> analyzeSelectedCrop());
 
         Button cancel = new Button(this);
@@ -148,7 +151,7 @@ public class LensCropActivity extends ComponentActivity {
             return;
         }
         analyzeButton.setEnabled(false);
-        statusLabel.setText("جارٍ تصحيح المنظور وتحليل الصورة عالية الدقة...");
+        statusLabel.setText("جارٍ تصحيح Perspective ثم FFT/Sub-pixel وقياس الفتحة والخيط...");
 
         executor.execute(() -> {
             try {
@@ -166,9 +169,9 @@ public class LensCropActivity extends ComponentActivity {
                     return;
                 }
 
-                File cropFile = new File(getCacheDir(), "meshcheck-lens20-crop-" + System.currentTimeMillis() + ".jpg");
+                File cropFile = new File(getCacheDir(), "meshcheck-v018-crop-" + System.currentTimeMillis() + ".jpg");
                 try (FileOutputStream stream = new FileOutputStream(cropFile)) {
-                    rectified.compress(Bitmap.CompressFormat.JPEG, 96, stream);
+                    rectified.compress(Bitmap.CompressFormat.JPEG, 98, stream);
                 }
                 rectified.recycle();
 
@@ -180,17 +183,26 @@ public class LensCropActivity extends ComponentActivity {
                 output.putExtra(NativeCameraActivity.EXTRA_RULER_BASE_PX_1X, 0f);
                 output.putExtra(NativeCameraActivity.EXTRA_MARKER_MODE, false);
                 output.putExtra(NativeCameraActivity.EXTRA_MANUAL_ROI_MODE, true);
-                output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_X_CM, result.xCount);
-                output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_Y_CM, result.yCount);
-                output.putExtra(NativeCameraActivity.EXTRA_FULL_LINE_X, Math.round(result.xCount * 2f));
-                output.putExtra(NativeCameraActivity.EXTRA_FULL_LINE_Y, Math.round(result.yCount * 2f));
-                float primary = result.xCount > 0f && result.yCount > 0f
-                        ? (result.xCount + result.yCount) / 2f
-                        : Math.max(result.xCount, result.yCount);
+                output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_X_CM, result.x.threadsPerCm);
+                output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_Y_CM, result.y.threadsPerCm);
+                output.putExtra(NativeCameraActivity.EXTRA_FULL_LINE_X, Math.round(result.x.threadsPerCm * 2f));
+                output.putExtra(NativeCameraActivity.EXTRA_FULL_LINE_Y, Math.round(result.y.threadsPerCm * 2f));
+                float primary = averagePositive(result.x.threadsPerCm, result.y.threadsPerCm);
                 output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_CM, primary);
                 output.putExtra(NativeCameraActivity.EXTRA_FULL_LINE_COUNT, Math.round(primary * 2f));
                 output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_CONFIDENCE, result.confidence);
                 output.putExtra(NativeCameraActivity.EXTRA_THREAD_COUNT_STABLE, true);
+
+                output.putExtra(NativeCameraActivity.EXTRA_PITCH_X_UM, result.x.pitchMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_PITCH_Y_UM, result.y.pitchMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_YARN_X_UM, result.x.yarnMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_YARN_Y_UM, result.y.yarnMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_OPENING_X_UM, result.x.openingMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_OPENING_Y_UM, result.y.openingMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_UNCERTAINTY_X_UM, result.x.uncertaintyMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_UNCERTAINTY_Y_UM, result.y.uncertaintyMicrons);
+                output.putExtra(NativeCameraActivity.EXTRA_QUALITY_SCORE, result.quality);
+                output.putExtra(NativeCameraActivity.EXTRA_SHARPNESS_SCORE, result.sharpness);
 
                 runOnUiThread(() -> {
                     setResult(RESULT_OK, output);
@@ -208,55 +220,72 @@ public class LensCropActivity extends ComponentActivity {
     private AnalysisResult analyzeRectified(Bitmap bitmap) {
         int w = bitmap.getWidth();
         int h = bitmap.getHeight();
-        if (w < 500 || h < 500) return AnalysisResult.fail("منطقة القص صغيرة جدًا — قرّب العدسة أو استخدم Zoom أكبر.");
+        if (w < 700 || h < 700) {
+            return AnalysisResult.fail("QUALITY: دقة القص منخفضة — قرّب العدسة أو استخدم Zoom أكبر ثم أعد التصوير.");
+        }
 
         int[] pixels = new int[w * h];
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h);
         float sharpness = gradientSharpness(pixels, w, h);
-        if (sharpness < 1.5f) return AnalysisResult.fail("الصورة غير حادة بما يكفي. أعد التصوير بعد التركيز على الخيوط.");
-
-        ThreadProfileCounter.Result[] xScans = buildScans(pixels, w, h, true);
-        ThreadProfileCounter.Result[] yScans = buildScans(pixels, w, h, false);
-        ThreadCountConsensus.FrameResult x = ThreadCountConsensus.fuse(xScans, ANALYSIS_LENGTH_CM);
-        ThreadCountConsensus.FrameResult y = ThreadCountConsensus.fuse(yScans, ANALYSIS_LENGTH_CM);
-
-        if (!x.ok && !y.ok) {
-            return AnalysisResult.fail("لم يتمكن التطبيق من تثبيت تكرار الخيوط داخل القص. اضبط الزوايا على الحافة الداخلية فقط.");
+        if (sharpness < 1.7f) {
+            return AnalysisResult.fail("QUALITY: Focus منخفض — أعد التصوير بعد الضغط على الخيوط للتركيز.");
         }
 
-        float xCount = x.ok ? x.threadsPerCm : 0f;
-        float yCount = y.ok ? y.threadsPerCm : 0f;
-        float baseConfidence = x.ok && y.ok ? Math.min(x.confidence, y.confidence)
-                : Math.max(x.confidence, y.confidence);
-        float sharpnessScore = clamp01((sharpness - 1.5f) / 10f);
-        float confidence = clamp01(baseConfidence * 0.88f + sharpnessScore * 0.12f);
-        return new AnalysisResult(true, "", xCount, yCount, confidence);
+        AdvancedMeshAnalyzer.ProfileResult[] xScans = buildAdvancedScans(pixels, w, h, true);
+        AdvancedMeshAnalyzer.ProfileResult[] yScans = buildAdvancedScans(pixels, w, h, false);
+        AdvancedMeshAnalyzer.DirectionResult x = AdvancedMeshAnalyzer.aggregate(xScans);
+        AdvancedMeshAnalyzer.DirectionResult y = AdvancedMeshAnalyzer.aggregate(yScans);
+
+        if (!x.ok || !y.ok) {
+            String detail = !x.ok ? "X: " + x.reason : "Y: " + y.reason;
+            return AnalysisResult.fail("QUALITY: Scan disagreement — " + detail + ". اضبط القص أو أعد التصوير.");
+        }
+
+        float engineConfidence = Math.min(x.confidence, y.confidence);
+        float sharpnessQuality = clamp01((sharpness - 1.7f) / 12f);
+        float scanCoverage = Math.min(x.validScans, y.validScans) / (float) SCAN_LINES;
+        float uncertaintyRatio = Math.max(
+                x.uncertaintyMicrons / Math.max(1f, x.pitchMicrons),
+                y.uncertaintyMicrons / Math.max(1f, y.pitchMicrons));
+        float uncertaintyQuality = clamp01(1f - uncertaintyRatio * 8f);
+        float quality = clamp01(engineConfidence * 0.52f
+                + sharpnessQuality * 0.17f
+                + scanCoverage * 0.18f
+                + uncertaintyQuality * 0.13f);
+        float confidence = clamp01(engineConfidence * 0.86f + quality * 0.14f);
+
+        if (quality < MIN_QUALITY) {
+            return AnalysisResult.fail(String.format(Locale.US,
+                    "QUALITY %.0f%% منخفضة — لا تعتمد القياس. حسّن التركيز/الإضاءة أو أعد القص.", quality * 100f));
+        }
+
+        return new AnalysisResult(true, "", x, y, confidence, quality, sharpness);
     }
 
-    private ThreadProfileCounter.Result[] buildScans(int[] pixels, int w, int h, boolean horizontal) {
-        ThreadProfileCounter.Result[] results = new ThreadProfileCounter.Result[SCAN_LINES];
+    private AdvancedMeshAnalyzer.ProfileResult[] buildAdvancedScans(int[] pixels, int w, int h, boolean horizontal) {
+        AdvancedMeshAnalyzer.ProfileResult[] results = new AdvancedMeshAnalyzer.ProfileResult[SCAN_LINES];
         int start = Math.round((horizontal ? w : h) * ANALYSIS_INSET);
         int end = Math.round((horizontal ? w : h) * (1f - ANALYSIS_INSET));
         int length = Math.max(1, end - start);
 
         for (int s = 0; s < SCAN_LINES; s++) {
-            float fixed = 0.07f + 0.86f * s / Math.max(1f, SCAN_LINES - 1f);
+            float fixed = 0.06f + 0.88f * s / Math.max(1f, SCAN_LINES - 1f);
             int fixedPx = Math.round((horizontal ? h : w) * fixed);
             float[] profile = new float[length];
             for (int i = 0; i < length; i++) {
                 int moving = start + i;
                 float sum = 0f;
                 int count = 0;
+                // Integrate a thin strip, reducing sensor noise without smearing thread edges too much.
                 for (int thick = -2; thick <= 2; thick++) {
                     int x = horizontal ? moving : clamp(fixedPx + thick, 0, w - 1);
                     int y = horizontal ? clamp(fixedPx + thick, 0, h - 1) : moving;
-                    int color = pixels[y * w + x];
-                    sum += luma(color);
+                    sum += luma(pixels[y * w + x]);
                     count++;
                 }
                 profile[i] = sum / count;
             }
-            results[s] = ThreadProfileCounter.analyze(profile, ANALYSIS_LENGTH_CM);
+            results[s] = AdvancedMeshAnalyzer.analyzeProfile(profile, ANALYSIS_LENGTH_CM);
         }
         return results;
     }
@@ -264,7 +293,7 @@ public class LensCropActivity extends ComponentActivity {
     private static float gradientSharpness(int[] pixels, int w, int h) {
         double sum = 0.0;
         int count = 0;
-        int step = Math.max(2, Math.min(w, h) / 400);
+        int step = Math.max(2, Math.min(w, h) / 420);
         for (int y = step; y < h - step; y += step) {
             for (int x = step; x < w - step; x += step) {
                 float c = luma(pixels[y * w + x]);
@@ -283,7 +312,7 @@ public class LensCropActivity extends ComponentActivity {
         float bottom = distance(q[4], q[5], q[6], q[7]);
         float left = distance(q[6], q[7], q[0], q[1]);
         int average = Math.round((top + right + bottom + left) / 4f);
-        return clamp(average, 900, 2000);
+        return clamp(average, 1100, 2400);
     }
 
     private static Bitmap rectify(Bitmap source, float[] q, int side) {
@@ -352,6 +381,11 @@ public class LensCropActivity extends ComponentActivity {
         return 0.299f * Color.red(color) + 0.587f * Color.green(color) + 0.114f * Color.blue(color);
     }
 
+    private static float averagePositive(float a, float b) {
+        if (a > 0f && b > 0f) return (a + b) * 0.5f;
+        return Math.max(a, b);
+    }
+
     private static float distance(float x1, float y1, float x2, float y2) {
         float dx = x2 - x1, dy = y2 - y1;
         return (float) Math.sqrt(dx * dx + dy * dy);
@@ -361,7 +395,7 @@ public class LensCropActivity extends ComponentActivity {
         if (q == null || q.length != 8) return false;
         for (int i = 0; i < 4; i++) {
             int j = (i + 1) % 4;
-            if (distance(q[i * 2], q[i * 2 + 1], q[j * 2], q[j * 2 + 1]) < 80f) return false;
+            if (distance(q[i * 2], q[i * 2 + 1], q[j * 2], q[j * 2 + 1]) < 100f) return false;
         }
         float sign = 0f;
         for (int i = 0; i < 4; i++) {
@@ -371,7 +405,7 @@ public class LensCropActivity extends ComponentActivity {
             float bcx = q[c * 2] - q[b * 2];
             float bcy = q[c * 2 + 1] - q[b * 2 + 1];
             float cross = abx * bcy - aby * bcx;
-            if (Math.abs(cross) < 30f) return false;
+            if (Math.abs(cross) < 40f) return false;
             if (sign == 0f) sign = Math.signum(cross);
             else if (Math.signum(cross) != sign) return false;
         }
@@ -382,6 +416,10 @@ public class LensCropActivity extends ComponentActivity {
         return Math.max(min, Math.min(max, value));
     }
 
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     private static float clamp01(float value) {
         return Math.max(0f, Math.min(1f, value));
     }
@@ -389,20 +427,28 @@ public class LensCropActivity extends ComponentActivity {
     private static final class AnalysisResult {
         final boolean ok;
         final String reason;
-        final float xCount;
-        final float yCount;
+        final AdvancedMeshAnalyzer.DirectionResult x;
+        final AdvancedMeshAnalyzer.DirectionResult y;
         final float confidence;
+        final float quality;
+        final float sharpness;
 
-        AnalysisResult(boolean ok, String reason, float xCount, float yCount, float confidence) {
+        AnalysisResult(boolean ok, String reason,
+                       AdvancedMeshAnalyzer.DirectionResult x,
+                       AdvancedMeshAnalyzer.DirectionResult y,
+                       float confidence, float quality, float sharpness) {
             this.ok = ok;
             this.reason = reason;
-            this.xCount = xCount;
-            this.yCount = yCount;
+            this.x = x;
+            this.y = y;
             this.confidence = confidence;
+            this.quality = quality;
+            this.sharpness = sharpness;
         }
 
         static AnalysisResult fail(String reason) {
-            return new AnalysisResult(false, reason, 0f, 0f, 0f);
+            AdvancedMeshAnalyzer.DirectionResult empty = AdvancedMeshAnalyzer.DirectionResult.fail(reason, 0);
+            return new AnalysisResult(false, reason, empty, empty, 0f, 0f, 0f);
         }
     }
 
@@ -413,6 +459,8 @@ public class LensCropActivity extends ComponentActivity {
         private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint magnifierBorder = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint magnifierCross = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float density;
         private final float handleRadius;
         private final float[] corners = new float[8]; // bitmap coordinates TL,TR,BR,BL
@@ -437,6 +485,11 @@ public class LensCropActivity extends ComponentActivity {
             textPaint.setColor(Color.WHITE);
             textPaint.setTextSize(12f * density);
             textPaint.setFakeBoldText(true);
+            magnifierBorder.setColor(Color.WHITE);
+            magnifierBorder.setStyle(Paint.Style.STROKE);
+            magnifierBorder.setStrokeWidth(3f * density);
+            magnifierCross.setColor(0xFFFFD54F);
+            magnifierCross.setStrokeWidth(1.5f * density);
         }
 
         @Override
@@ -505,6 +558,40 @@ public class LensCropActivity extends ComponentActivity {
                 float tw = textPaint.measureText(names[i]);
                 canvas.drawText(names[i], x - tw / 2f, y + 5f * density, textPaint);
             }
+            if (activeCorner >= 0) drawMagnifier(canvas, q, activeCorner);
+        }
+
+        private void drawMagnifier(Canvas canvas, float[] q, int corner) {
+            float radius = 57f * density;
+            float cx = bxToView(q[corner * 2]) < getWidth() / 2f
+                    ? getWidth() - radius - 12f * density
+                    : radius + 12f * density;
+            float cy = Math.max(radius + 65f * density, Math.min(getHeight() - radius - 155f * density, radius + 75f * density));
+            float bx = q[corner * 2];
+            float by = q[corner * 2 + 1];
+            float sourceHalf = radius / Math.max(0.001f, scale * 5.5f);
+            Rect src = new Rect(
+                    clamp(Math.round(bx - sourceHalf), 0, bitmap.getWidth() - 1),
+                    clamp(Math.round(by - sourceHalf), 0, bitmap.getHeight() - 1),
+                    clamp(Math.round(bx + sourceHalf), 1, bitmap.getWidth()),
+                    clamp(Math.round(by + sourceHalf), 1, bitmap.getHeight()));
+            RectF dst = new RectF(cx - radius, cy - radius, cx + radius, cy + radius);
+
+            int save = canvas.save();
+            canvas.clipPath(circlePath(cx, cy, radius));
+            canvas.drawColor(Color.BLACK);
+            canvas.drawBitmap(bitmap, src, dst, imagePaint);
+            canvas.restoreToCount(save);
+            canvas.drawCircle(cx, cy, radius, magnifierBorder);
+            canvas.drawLine(cx - radius * 0.72f, cy, cx + radius * 0.72f, cy, magnifierCross);
+            canvas.drawLine(cx, cy - radius * 0.72f, cx, cy + radius * 0.72f, magnifierCross);
+            canvas.drawText("5.5×", cx - 14f * density, cy - radius + 17f * density, textPaint);
+        }
+
+        private Path circlePath(float cx, float cy, float radius) {
+            Path p = new Path();
+            p.addCircle(cx, cy, radius, Path.Direction.CW);
+            return p;
         }
 
         @Override
@@ -515,6 +602,7 @@ public class LensCropActivity extends ComponentActivity {
                     activeCorner = nearestCorner(x, y);
                     if (activeCorner >= 0) {
                         getParent().requestDisallowInterceptTouchEvent(true);
+                        invalidate();
                         return true;
                     }
                     if (insideQuad(x, y)) {
@@ -547,6 +635,7 @@ public class LensCropActivity extends ComponentActivity {
                     activeCorner = -1;
                     movingWhole = false;
                     getParent().requestDisallowInterceptTouchEvent(false);
+                    invalidate();
                     return true;
                 default:
                     return true;
@@ -556,7 +645,7 @@ public class LensCropActivity extends ComponentActivity {
         private int nearestCorner(float x, float y) {
             float[] q = bitmapCorners();
             int best = -1;
-            float bestDistance = handleRadius * 2.4f;
+            float bestDistance = handleRadius * 2.7f;
             for (int i = 0; i < 4; i++) {
                 float dx = x - bxToView(q[i * 2]);
                 float dy = y - byToView(q[i * 2 + 1]);
@@ -598,10 +687,6 @@ public class LensCropActivity extends ComponentActivity {
                     corners[i * 2 + 1] += dy;
                 }
             }
-        }
-
-        private static float clamp(float value, float min, float max) {
-            return Math.max(min, Math.min(max, value));
         }
     }
 }
