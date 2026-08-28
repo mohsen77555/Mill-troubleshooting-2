@@ -173,8 +173,8 @@ public class MainActivity extends Activity {
             float burstSharpness = captureData.getFloatExtra(NativeCameraActivity.EXTRA_BURST_SHARPNESS, 0f);
 
             JSONArray counts = new JSONArray();
-            if (xCount > 0f) counts.put(xCount);
-            if (yCount > 0f) counts.put(yCount);
+            if (xCount > 0f) counts.put((double) xCount);
+            if (yCount > 0f) counts.put((double) yCount);
             JSONArray pitches = positiveArray(pitchX, pitchY);
             JSONArray yarns = positiveArray(yarnX, yarnY);
             JSONArray openings = positiveArray(openingX, openingY);
@@ -234,8 +234,10 @@ public class MainActivity extends Activity {
 
     private static JSONArray positiveArray(float a, float b) {
         JSONArray array = new JSONArray();
-        if (a > 0f) array.put(a);
-        if (b > 0f) array.put(b);
+        try {
+            if (a > 0f) array.put((double) a);
+            if (b > 0f) array.put((double) b);
+        } catch (Exception ignored) {}
         return array;
     }
 
