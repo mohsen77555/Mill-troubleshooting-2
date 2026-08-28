@@ -12,18 +12,18 @@
     <header class="hero">
       <p class="eyebrow">فحص داخلي للمطحنة - يعمل دون إنترنت</p>
       <h1>MeshCheck Sefar</h1>
-      <p>افتح كاميرا Android الأصلية، عاير مسطرة 1 cm مرة واحدة، ثم يعد التطبيق الخيوط الكاملة داخلها ويطابقها مع كتالوج Sefar.</p>
+      <p>High Accuracy: عدسة/فتحة حقيقية 20×20 mm → Burst من 5 صور → اختيار الأوضح → Crop → تصحيح Perspective → قياس Sub-pixel ومطابقة Sefar.</p>
     </header>
 
-    <section class="notice" aria-label="شرط القياس">
-      <strong>Thread count:</strong> في وضع الكاميرا الأصلية، عدد الخيوط لا يؤخذ من مقياس قديم. التطبيق يعد مراكز الخيوط الواقعة فعليًا بين طرفي مسطرة <b>1 cm</b> الوسطية، ويثبت النتيجة عبر عدة إطارات متتالية. يجب الحفاظ على نفس Fixed Distance بعد المعايرة.
+    <section class="notice" aria-label="طريقة القياس">
+      <strong>v0.18 High Accuracy:</strong> لا توجد معايرة مسطرة يدوية في مسار العدسة. ضع عدستك ذات الفتحة الداخلية الحقيقية <b>20×20 mm</b>، التقط Burst، ثم ضع نقاط القص الأربع على الزوايا الداخلية للفتحة. التطبيق يقيس X وY بشكل مستقل ويحسب <b>n/cm + Pitch + Yarn + Opening + uncertainty</b> قبل مطابقة كتالوج Sefar.
     </section>
 
     <section class="card workflow camera-card">
-      <div class="step-title"><span>1</span><div><h2>كاميرا Android الأصلية</h2><p>CameraX مع Zoom وTap-to-focus وFlash ومسطرة 1 cm لعد الخيوط مباشرة.</p></div></div>
+      <div class="step-title"><span>1</span><div><h2>كاميرا Android الأصلية</h2><p>Gyroscope anti-vibration، Tap focus، Zoom، Burst 5 صور، واختيار أوضح لقطة تلقائيًا.</p></div></div>
       <div class="camera-frame">
         <video id="cameraPreview" autoplay playsinline muted></video>
-        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا». ستفتح الكاميرا بملء الشاشة.</div>
+        <div id="cameraPlaceholder" class="camera-placeholder">اضغط «فتح الكاميرا». ستفتح كاميرا القياس بملء الشاشة.</div>
         <div id="liveOverlay" class="live-overlay waiting">
           <div class="live-state"><span id="liveStateDot"></span><strong id="liveState">بانتظار الكاميرا</strong></div>
           <div class="live-main"><strong id="liveCode">—</strong><span id="liveConfidence">—</span></div>
@@ -32,7 +32,7 @@
             <div><span>Mesh/in</span><strong id="liveMesh">—</strong></div>
             <div><span>Pitch</span><strong id="livePitch">—</strong></div>
           </div>
-          <small id="liveHint">افتح الكاميرا ثم التقط صورة للتحليل.</small>
+          <small id="liveHint">استخدم الكاميرا الأصلية للحصول على أعلى دقة.</small>
         </div>
       </div>
       <div class="field-grid one-row live-material">
@@ -50,7 +50,7 @@
         <button id="captureCamera" class="primary" type="button" disabled>التقاط من WebView</button>
         <button id="stopCamera" class="secondary" type="button" disabled>إيقاف</button>
       </div>
-      <p id="cameraStatus" class="helper">عند أول استخدام سيطلب Android إذن الكاميرا.</p>
+      <p id="cameraStatus" class="helper">داخل الكاميرا الأصلية استخدم Burst + قص للحصول على القياس الدقيق.</p>
       <div class="camera-divider"><span>أو</span></div>
       <label class="upload" for="imagePicker">
         <input id="imagePicker" type="file" accept="image/*">
@@ -60,9 +60,9 @@
     </section>
 
     <section class="card workflow">
-      <div class="step-title"><span>2</span><div><h2>التحليل النهائي للصورة</h2><p>في التصوير الأصلي يستخدم التطبيق عد 1 cm كمرجع أساسي لعدد الخيوط، ثم يطابق أقرب مواصفة Sefar.</p></div></div>
+      <div class="step-title"><span>2</span><div><h2>التحليل النهائي ومطابقة Sefar</h2><p>في مسار العدسة يعتمد التطبيق قياسات 20×20 mm عالية الدقة. مصدر مواصفات Sefar هو ملفك فقط.</p></div></div>
       <button id="autoAnalyze" class="primary wide" type="button">تحليل الصورة ومطابقة Sefar</button>
-      <p id="autoStatus" class="helper">التقط صورة أو اختر صورة أولًا.</p>
+      <p id="autoStatus" class="helper">التقط Burst + Crop أو اختر صورة أولًا.</p>
     </section>
 
     <section class="card canvas-card">
@@ -85,10 +85,13 @@
         <small id="materialMetric">—</small>
       </div>
       <div class="metrics">
-        <div><span>الفتحة الصافية</span><strong id="openingMetric">—</strong></div>
-        <div><span>Pitch (خيط إلى خيط)</span><strong id="pitchMetric">—</strong></div>
+        <div><span>Opening المقاس</span><strong id="openingMetric">—</strong></div>
+        <div><span>Yarn / Wire المقاس</span><strong id="yarnMetric">—</strong></div>
+        <div><span>Pitch المقاس</span><strong id="pitchMetric">—</strong></div>
         <div><span>عدد الخيوط</span><strong id="threadMetric">—</strong></div>
-        <div><span>الثقة</span><strong id="confidenceMetric">—</strong></div>
+        <div><span>Uncertainty</span><strong id="uncertaintyMetric">—</strong></div>
+        <div><span>Quality</span><strong id="measurementQualityMetric">—</strong></div>
+        <div><span>الثقة النهائية</span><strong id="confidenceMetric">—</strong></div>
       </div>
       <p id="resultSummary" class="summary">بعد التحليل ستظهر هنا نتيجة القياس والمطابقة.</p>
       <ul id="warnings" class="warnings" hidden></ul>
@@ -103,8 +106,8 @@
     </section>
 
     <details class="card advanced">
-      <summary>معايرة وتحليل يدوي متقدم</summary>
-      <p class="helper">استخدمه إذا كانت المسطرة غير ظاهرة أو إذا أعطى التحليل التلقائي ثقة منخفضة.</p>
+      <summary>تحليل يدوي متقدم - احتياطي</summary>
+      <p class="helper">هذا المسار احتياطي للصور التي لا تستخدم عدسة 20×20 mm.</p>
       <div class="field-grid">
         <label>طول المرجع (µm)
           <input id="referenceMicrons" inputmode="decimal" type="number" min="0.01" step="0.01" value="1000">
@@ -126,7 +129,7 @@
         </label>
       </div>
       <button id="manualAnalyze" class="secondary wide" type="button">قياس الفتحات يدويًا</button>
-      <p id="calibrationStatus" class="helper">التقط أو اختر صورة ثم عايرها بنقطتين على طول معروف.</p>
+      <p id="calibrationStatus" class="helper">اختر صورة ثم استخدم مرجعًا معروفًا إذا احتجت الوضع اليدوي.</p>
     </details>
 
     <footer>مصدر مواصفات Sefar داخل التطبيق: الملف المرفق sefar milling-EN(3).pdf فقط.</footer>
