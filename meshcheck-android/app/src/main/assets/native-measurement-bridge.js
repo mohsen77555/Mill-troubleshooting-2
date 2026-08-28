@@ -17,6 +17,14 @@
     return single > 0 ? [single] : [];
   }
 
+  function numericArray(value) {
+    return Array.isArray(value) ? value.map(Number).filter(v => Number.isFinite(v) && v > 0) : [];
+  }
+
+  function average(values) {
+    return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+  }
+
   const originalInspect = MeshAnalyzer.autoInspect;
   MeshAnalyzer.autoInspect = function (imageData) {
     const native = nativeMeasurement();
@@ -26,13 +34,26 @@
     if (!native) return original;
 
     const counts = measuredCounts(native);
-    const average = counts.reduce((a, b) => a + b, 0) / Math.max(1, counts.length);
+    const avgCount = average(counts);
+    const nativeOpening = Number(native.openingMicrons) || average(numericArray(native.openingMicronsXY));
+    const nativeYarn = Number(native.yarnMicrons) || average(numericArray(native.yarnMicronsXY));
+    const nativePitch = Number(native.pitchMicrons) || average(numericArray(native.pitchMicronsXY));
+    const uncertainty = Number(native.uncertaintyMicrons) || average(numericArray(native.uncertaintyMicronsXY));
+    const quality = Number(native.quality) || 0;
+
     const warnings = original && Array.isArray(original.warnings) ? original.warnings.slice() : [];
-    if (native.source === "manual_20x20_mm_roi") {
+    if (native.source === "lens_crop_20x20_high_accuracy") {
       warnings.push(
-        "Thread count measured only inside the user-defined physical 20×20 mm square: X=" +
+        "High-accuracy 20×20 mm crop: X=" + Number(native.threadsXPerCm || 0).toFixed(2) +
+        "/cm, Y=" + Number(native.threadsYPerCm || 0).toFixed(2) +
+        "/cm, opening≈" + Math.round(nativeOpening) + " µm, yarn≈" + Math.round(nativeYarn) +
+        " µm, uncertainty≈±" + Math.round(uncertainty) + " µm, quality=" + Math.round(quality * 100) + "% ."
+      );
+    } else if (native.source === "manual_20x20_mm_roi") {
+      warnings.push(
+        "Thread count measured inside the physical 20×20 mm square: X=" +
         Number(native.threadsXPerCm || 0).toFixed(1) + "/cm, Y=" +
-        Number(native.threadsYPerCm || 0).toFixed(1) + "/cm. No automatic marker detection was used."
+        Number(native.threadsYPerCm || 0).toFixed(1) + "/cm."
       );
     } else if (native.source === "marker_20x20_mm") {
       warnings.push(
@@ -45,10 +66,19 @@
     const result = original && original.ok ? Object.assign({}, original) : {
       ok: true, components: [], openingMicrons: null, micronsPerPixel: null, warnings: []
     };
-    result.pitchMicrons = average > 0 ? 10000 / average : null;
-    result.threadsPerCm = average;
+    result.pitchMicrons = nativePitch > 0 ? nativePitch : (avgCount > 0 ? 10000 / avgCount : null);
+    result.threadsPerCm = avgCount;
     result.threadCountsPerCm = counts;
-    result.threadsPerInch = average * 2.54;
+    result.threadsPerInch = avgCount * 2.54;
+    if (nativeOpening > 0) result.openingMicrons = nativeOpening;
+    if (nativeYarn > 0) result.yarnMicrons = nativeYarn;
+    result.pitchMicronsXY = numericArray(native.pitchMicronsXY);
+    result.openingMicronsXY = numericArray(native.openingMicronsXY);
+    result.yarnMicronsXY = numericArray(native.yarnMicronsXY);
+    result.uncertaintyMicrons = uncertainty || null;
+    result.measurementQuality = quality || null;
+    result.nativeSharpness = Number(native.sharpness) || null;
+    result.burstSharpness = Number(native.burstSharpness) || null;
     result.confidence = Math.max(Number(result.confidence) || 0, Number(native.confidence) || 0.55);
     result.warnings = warnings;
     result.threadCountSource = native.source || "native_camera";
@@ -74,34 +104,70 @@
     return Math.min(direct, swapped);
   }
 
+  function catalogYarnOptions(item) {
+    const out = [];
+    if (typeof item.yarnMicrons === "number" && item.yarnMicrons > 0) out.push(item.yarnMicrons);
+    if (Array.isArray(item.yarns)) {
+      item.yarns.forEach(v => {
+        const text = String(v).trim();
+        if (/^\d+(\.\d+)?$/.test(text)) out.push(Number(text));
+      });
+    }
+    return out;
+  }
+
+  function nearestScalarError(measured, options) {
+    if (!(measured > 0) || !options.length) return null;
+    return Math.min.apply(null, options.map(v => relativeError(measured, v)));
+  }
+
   const originalMatchCandidates = SefarCatalog.matchCandidates;
   SefarCatalog.matchCandidates = function (measurement, materialFilter) {
     const native = nativeMeasurement();
     if (!native) return originalMatchCandidates(measurement, materialFilter);
 
-    const measured = measuredCounts(native);
-    const measuredOpening = Number(measurement && measurement.openingMicrons);
+    const measuredCountsArray = measuredCounts(native);
+    const measuredOpenings = numericArray(native.openingMicronsXY);
+    const measuredYarns = numericArray(native.yarnMicronsXY);
+    const measuredOpening = Number(native.openingMicrons) || average(measuredOpenings);
+    const measuredYarn = Number(native.yarnMicrons) || average(measuredYarns);
     const material = materialFilter && materialFilter !== "Auto" ? materialFilter : null;
 
     return SefarCatalog.fabrics
       .filter(item => !material || item.material === material)
       .map(item => {
-        const catalog = Array.isArray(item.threadCountsPerCm)
+        const catalogCounts = Array.isArray(item.threadCountsPerCm)
           ? item.threadCountsPerCm.map(Number).filter(v => v > 0)
           : [Number(item.threadsPerCm)].filter(v => v > 0);
-        const threadCountError = countMatchError(measured, catalog);
+        const threadCountError = countMatchError(measuredCountsArray, catalogCounts);
         const openingError = measuredOpening > 0
-          ? Math.abs(measuredOpening - item.openingMicrons) / Math.max(1, item.openingMicrons)
+          ? relativeError(measuredOpening, Number(item.openingMicrons))
           : null;
-        const score = openingError == null
-          ? threadCountError
-          : threadCountError * 0.84 + openingError * 0.16;
+        const yarnOptions = catalogYarnOptions(item);
+        const yarnError = nearestScalarError(measuredYarn, yarnOptions);
+
+        let score;
+        if (openingError != null && yarnError != null) {
+          score = threadCountError * 0.58 + openingError * 0.28 + yarnError * 0.14;
+        } else if (openingError != null) {
+          score = threadCountError * 0.68 + openingError * 0.32;
+        } else {
+          score = threadCountError;
+        }
+
+        const quality = Number(native.quality) || 0.7;
+        const qualityPenalty = Math.max(0, 0.75 - quality) * 0.10;
+        score += qualityPenalty;
+
         return Object.assign({}, item, {
-          measuredThreadCountsPerCm: measured.slice(),
+          measuredThreadCountsPerCm: measuredCountsArray.slice(),
+          measuredOpeningMicrons: measuredOpening || null,
+          measuredYarnMicrons: measuredYarn || null,
           threadCountError,
           openingError,
+          yarnError,
           score,
-          confidence: Math.max(0, Math.min(99, Math.round(100 * (1 - score * 2.3))))
+          confidence: Math.max(0, Math.min(99, Math.round(100 * (1 - score * 2.3) * Math.min(1, 0.82 + quality * 0.18))))
         });
       })
       .sort((a, b) => a.score !== b.score ? a.score - b.score : a.code.localeCompare(b.code));
