@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -46,13 +48,14 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 
 /**
- * v0.17: high-accuracy lens workflow.
- * Camera / gallery -> user crops the INNER physical 20x20 mm opening -> perspective correction -> high-res counting.
+ * v0.18 high-accuracy camera workflow.
+ * Gyroscope hold -> AF/AE metering hold -> 5-frame burst -> sharpest frame -> 20x20 crop -> metrology.
  */
 public class NativeCameraActivity extends ComponentActivity implements SensorEventListener {
     public static final String EXTRA_CAPTURE_PATH = "meshcheck.capture_path";
@@ -71,11 +74,24 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
     public static final String EXTRA_MARKER_MODE = "meshcheck.marker_20mm";
     public static final String EXTRA_MANUAL_ROI_MODE = "meshcheck.manual_20mm_roi";
 
+    public static final String EXTRA_PITCH_X_UM = "meshcheck.pitch_x_um";
+    public static final String EXTRA_PITCH_Y_UM = "meshcheck.pitch_y_um";
+    public static final String EXTRA_YARN_X_UM = "meshcheck.yarn_x_um";
+    public static final String EXTRA_YARN_Y_UM = "meshcheck.yarn_y_um";
+    public static final String EXTRA_OPENING_X_UM = "meshcheck.opening_x_um";
+    public static final String EXTRA_OPENING_Y_UM = "meshcheck.opening_y_um";
+    public static final String EXTRA_UNCERTAINTY_X_UM = "meshcheck.uncertainty_x_um";
+    public static final String EXTRA_UNCERTAINTY_Y_UM = "meshcheck.uncertainty_y_um";
+    public static final String EXTRA_QUALITY_SCORE = "meshcheck.quality_score";
+    public static final String EXTRA_SHARPNESS_SCORE = "meshcheck.sharpness_score";
+    public static final String EXTRA_BURST_SHARPNESS = "meshcheck.burst_sharpness";
+
     private static final int CAMERA_PERMISSION_REQUEST = 2201;
     private static final int CROP_REQUEST = 2202;
     private static final int GALLERY_REQUEST = 2203;
+    private static final int BURST_COUNT = 5;
     private static final float MOTION_THRESHOLD_RAD_S = 0.12f;
-    private static final long STABLE_REQUIRED_MS = 450L;
+    private static final long STABLE_REQUIRED_MS = 500L;
 
     private PreviewView previewView;
     private ImageCapture imageCapture;
@@ -91,8 +107,10 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
     private boolean torchOn;
     private boolean zoomGestureUsed;
     private boolean cameraReady;
+    private boolean burstRunning;
     private volatile float currentZoomRatio = 1f;
     private String pendingOriginalPath;
+    private float lastBurstSharpness;
 
     private SensorManager sensorManager;
     private Sensor gyroscope;
@@ -127,7 +145,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView guide = new TextView(this);
-        guide.setText("ضع عدسة/إطار 20×20 بالكامل داخل الصورة • اضغط على الخيوط للتركيز • بعد الالتقاط ستقص الحافة الداخلية بدقة");
+        guide.setText("ضع عدسة/إطار 20×20 بالكامل داخل الصورة • Tap للتركيز • التطبيق يأخذ 5 صور ويختار الأوضح");
         guide.setTextColor(Color.WHITE);
         guide.setTextSize(13f);
         guide.setGravity(Gravity.CENTER);
@@ -171,7 +189,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
         actions.setGravity(Gravity.CENTER);
 
         captureButton = new Button(this);
-        captureButton.setText("التقاط + قص");
+        captureButton.setText("Burst + قص");
         captureButton.setTextSize(10f);
         captureButton.setEnabled(false);
         captureButton.setOnClickListener(v -> captureForCrop());
@@ -241,17 +259,19 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
             if (stableSinceMs == 0L) stableSinceMs = now;
             motionDetected = now - stableSinceMs < STABLE_REQUIRED_MS;
         }
-        runOnUiThread(this::updateCaptureState);
+        if (!burstRunning) runOnUiThread(this::updateCaptureState);
     }
 
     @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
     private void updateCaptureState() {
         boolean stable = gyroscope == null || !motionDetected;
-        captureButton.setEnabled(cameraReady && stable);
+        captureButton.setEnabled(cameraReady && stable && !burstRunning);
+        galleryButton.setEnabled(!burstRunning);
+        if (burstRunning) return;
         if (!cameraReady) statusLabel.setText("انتظر تشغيل الكاميرا...");
         else if (!stable) statusLabel.setText("HOLD — ثبّت الهاتف للحظة قبل الالتقاط");
-        else statusLabel.setText("✓ ثابت — التقط الصورة ثم حدّد الفتحة الداخلية 20×20 في شاشة القص");
+        else statusLabel.setText("✓ ثابت — Tap على الخيوط للتركيز ثم Burst + قص");
         overlay.setStable(stable);
     }
 
@@ -259,10 +279,10 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
         scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScaleBegin(@NonNull ScaleGestureDetector detector) {
                 zoomGestureUsed = true;
-                return true;
+                return !burstRunning;
             }
             @Override public boolean onScale(@NonNull ScaleGestureDetector detector) {
-                if (camera == null) return false;
+                if (camera == null || burstRunning) return false;
                 ZoomState state = camera.getCameraInfo().getZoomState().getValue();
                 if (state == null) return false;
                 setZoom(state.getZoomRatio() * detector.getScaleFactor());
@@ -270,6 +290,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
             }
         });
         previewView.setOnTouchListener((view, event) -> {
+            if (burstRunning) return true;
             if (event.getActionMasked() == MotionEvent.ACTION_DOWN) zoomGestureUsed = false;
             scaleGestureDetector.onTouchEvent(event);
             if (event.getActionMasked() == MotionEvent.ACTION_UP && !zoomGestureUsed) {
@@ -294,7 +315,9 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
         Button b = new Button(this);
         b.setText(text);
         b.setTextSize(10f);
-        b.setOnClickListener(v -> setZoom(ratio));
+        b.setOnClickListener(v -> {
+            if (!burstRunning) setZoom(ratio);
+        });
         return b;
     }
 
@@ -340,47 +363,140 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
     private void focusAt(float x, float y) {
         if (camera == null) return;
         try {
+            camera.getCameraControl().cancelFocusAndMetering();
             MeteringPoint point = previewView.getMeteringPointFactory().createPoint(x, y);
             FocusMeteringAction action = new FocusMeteringAction.Builder(point,
                     FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
-                    .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                    .disableAutoCancel()
                     .build();
             camera.getCameraControl().startFocusAndMetering(action);
             overlay.showFocus(x, y);
+            statusLabel.setText("AF/AE HOLD — ثبّت الهاتف ثم التقط Burst");
         } catch (Exception ignored) {}
     }
 
     private void toggleTorch() {
-        if (camera == null || !camera.getCameraInfo().hasFlashUnit()) return;
+        if (camera == null || !camera.getCameraInfo().hasFlashUnit() || burstRunning) return;
         torchOn = !torchOn;
         camera.getCameraControl().enableTorch(torchOn);
         flashButton.setText(torchOn ? "FLASH ON" : "FLASH");
     }
 
     private void captureForCrop() {
-        if (imageCapture == null || !cameraReady) return;
+        if (imageCapture == null || !cameraReady || burstRunning) return;
         if (gyroscope != null && motionDetected) {
             Toast.makeText(this, "ثبّت الهاتف للحظة ثم التقط.", Toast.LENGTH_SHORT).show();
             return;
         }
+        burstRunning = true;
         captureButton.setEnabled(false);
-        statusLabel.setText("جارٍ التقاط الصورة عالية الدقة...");
-        File output = new File(getCacheDir(), "meshcheck-lens-original-" + System.currentTimeMillis() + ".jpg");
+        galleryButton.setEnabled(false);
+        statusLabel.setText("Burst 1/" + BURST_COUNT + " — لا تحرك الهاتف");
+        List<File> frames = new ArrayList<>();
+        captureBurstFrame(0, frames);
+    }
+
+    private void captureBurstFrame(int index, List<File> frames) {
+        if (!burstRunning) {
+            deleteFiles(frames, null);
+            return;
+        }
+        if (gyroscope != null && motionDetected && index > 0) {
+            deleteFiles(frames, null);
+            burstRunning = false;
+            statusLabel.setText("تم إلغاء Burst بسبب الاهتزاز — ثبّت الهاتف وأعد الالتقاط");
+            updateCaptureState();
+            return;
+        }
+        if (index >= BURST_COUNT) {
+            finishBurst(frames);
+            return;
+        }
+
+        statusLabel.setText("Burst " + (index + 1) + "/" + BURST_COUNT + " — HOLD");
+        File output = new File(getCacheDir(), "meshcheck-burst-" + System.currentTimeMillis() + "-" + index + ".jpg");
         ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(output).build();
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
             @Override public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
-                pendingOriginalPath = output.getAbsolutePath();
-                launchCrop(pendingOriginalPath, currentZoomRatio);
+                frames.add(output);
+                captureBurstFrame(index + 1, frames);
             }
+
             @Override public void onError(@NonNull ImageCaptureException exception) {
+                output.delete();
+                deleteFiles(frames, null);
+                burstRunning = false;
                 updateCaptureState();
                 Toast.makeText(NativeCameraActivity.this,
-                        "تعذر التقاط الصورة: " + exception.getMessage(), Toast.LENGTH_LONG).show();
+                        "تعذر Burst: " + exception.getMessage(), Toast.LENGTH_LONG).show();
             }
         });
     }
 
+    private void finishBurst(List<File> frames) {
+        if (frames.isEmpty()) {
+            burstRunning = false;
+            updateCaptureState();
+            return;
+        }
+        File best = null;
+        float bestScore = -1f;
+        for (File file : frames) {
+            float score = fileSharpness(file);
+            if (score > bestScore) {
+                bestScore = score;
+                best = file;
+            }
+        }
+        if (best == null) best = frames.get(0);
+        lastBurstSharpness = Math.max(0f, bestScore);
+        deleteFiles(frames, best);
+        pendingOriginalPath = best.getAbsolutePath();
+        burstRunning = false;
+        statusLabel.setText(String.format(Locale.US,
+                "تم اختيار أوضح لقطة من %d • Sharpness %.1f — افتح القص", BURST_COUNT, lastBurstSharpness));
+        launchCrop(pendingOriginalPath, currentZoomRatio);
+    }
+
+    private static void deleteFiles(List<File> files, File keep) {
+        for (File file : files) if (file != null && (keep == null || !file.equals(keep))) file.delete();
+    }
+
+    private static float fileSharpness(File file) {
+        Bitmap bitmap = null;
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 4;
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            if (bitmap == null || bitmap.getWidth() < 30 || bitmap.getHeight() < 30) return 0f;
+            int w = bitmap.getWidth(), h = bitmap.getHeight();
+            int step = Math.max(2, Math.min(w, h) / 240);
+            double sum = 0.0;
+            int count = 0;
+            for (int y = step; y < h - step; y += step) {
+                for (int x = step; x < w - step; x += step) {
+                    float c = luma(bitmap.getPixel(x, y));
+                    float gx = Math.abs(luma(bitmap.getPixel(x + step, y)) - c);
+                    float gy = Math.abs(luma(bitmap.getPixel(x, y + step)) - c);
+                    sum += gx + gy;
+                    count++;
+                }
+            }
+            return count > 0 ? (float) (sum / count) : 0f;
+        } catch (Exception ignored) {
+            return 0f;
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        }
+    }
+
+    private static float luma(int color) {
+        return 0.299f * Color.red(color) + 0.587f * Color.green(color) + 0.114f * Color.blue(color);
+    }
+
     private void chooseImageForCrop() {
+        if (burstRunning) return;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("image/*");
@@ -402,6 +518,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
                 while ((read = input.read(buffer)) != -1) stream.write(buffer, 0, read);
             }
             pendingOriginalPath = output.getAbsolutePath();
+            lastBurstSharpness = fileSharpness(output);
             launchCrop(pendingOriginalPath, 1f);
         } catch (Exception e) {
             Toast.makeText(this, "تعذر تجهيز الصورة للقص: " + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -430,11 +547,12 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
                 pendingOriginalPath = null;
             }
             if (resultCode == Activity.RESULT_OK && data != null) {
+                data.putExtra(EXTRA_BURST_SHARPNESS, lastBurstSharpness);
                 setResult(RESULT_OK, data);
                 finish();
             } else {
                 updateCaptureState();
-                statusLabel.setText("تم إلغاء القص — يمكنك إعادة الالتقاط أو اختيار صورة أخرى.");
+                statusLabel.setText("تم إلغاء القص — يمكنك إعادة Burst أو اختيار صورة أخرى.");
             }
         }
     }
@@ -453,6 +571,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
 
     @Override
     protected void onDestroy() {
+        burstRunning = false;
         if (pendingOriginalPath != null) new File(pendingOriginalPath).delete();
         super.onDestroy();
     }
@@ -509,7 +628,7 @@ public class NativeCameraActivity extends ComponentActivity implements SensorEve
             RectF box = new RectF(cx - side / 2f, cy - side / 2f, cx + side / 2f, cy + side / 2f);
             Paint p = stable ? stablePaint : guidePaint;
             canvas.drawRoundRect(box, 10f * density, 10f * density, p);
-            String label = stable ? "ضع العدسة كاملة هنا • STABLE" : "ضع العدسة كاملة هنا";
+            String label = stable ? "عدسة 20×20 داخل الإطار • STABLE" : "ضع العدسة كاملة هنا";
             canvas.drawText(label, Math.max(12f, box.left), Math.max(80f, box.top - 14f * density), textPaint);
 
             if (focusX >= 0f && System.currentTimeMillis() - focusTime < 1200L) {
