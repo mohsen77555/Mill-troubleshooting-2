@@ -42,19 +42,22 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Test 20 mm physical-window thread measurement
+      - name: Test 20 mm and high accuracy metrology
         run: |
           mkdir -p build/thread-counter-test
           javac -d build/thread-counter-test \
             app/src/main/java/com/alhadi/meshcheck/ThreadProfileCounter.java \
             app/src/main/java/com/alhadi/meshcheck/ThreadCountConsensus.java \
             app/src/main/java/com/alhadi/meshcheck/Marker20mmDetector.java \
+            app/src/main/java/com/alhadi/meshcheck/AdvancedMeshAnalyzer.java \
             tests/ThreadProfileCounterTest.java \
             tests/ThreadCountConsensusTest.java \
-            tests/Physical20mmWindowTest.java
+            tests/Physical20mmWindowTest.java \
+            tests/AdvancedMeshAnalyzerTest.java
           java -cp build/thread-counter-test ThreadProfileCounterTest
           java -cp build/thread-counter-test ThreadCountConsensusTest
           java -cp build/thread-counter-test Physical20mmWindowTest
+          java -cp build/thread-counter-test AdvancedMeshAnalyzerTest
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -75,11 +78,11 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p output
-          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.17.0-lens-crop-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk output/MeshCheck-Sefar-v0.18.0-high-accuracy-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MeshCheck-Sefar-v0.17.0-lens-crop-debug-apk
-          path: meshcheck-android/output/MeshCheck-Sefar-v0.17.0-lens-crop-debug.apk
+          name: MeshCheck-Sefar-v0.18.0-high-accuracy-debug-apk
+          path: meshcheck-android/output/MeshCheck-Sefar-v0.18.0-high-accuracy-debug.apk
           if-no-files-found: error
